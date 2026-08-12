@@ -35,6 +35,11 @@ In this repository, we provide comprehensive guidelines for using the data recor
 }
 ```
 
+> **Aria Gen 2 users:** this repo was written and benchmarked for Aria Gen 1. Gen 2 support
+> (renamed SLAM camera labels, four tracking cameras, non-square RGB, readout time sourced
+> from MPS) is documented in **[docs/gen2.md](docs/gen2.md)**. Preprocessing runs on CPU;
+> only training needs a GPU.
+
 ## Quick start
 
 ``` bash

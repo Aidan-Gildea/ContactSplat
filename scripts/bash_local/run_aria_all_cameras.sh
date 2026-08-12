@@ -11,8 +11,9 @@
 data_root=data/aria_scenes/livingroom
 # use the right folder name accordingly
 # RGB folder name: camera-rgb-rectified-1200-h2400
-# SLAM folder names: slam-*-rectified-180-h480
-scene_name="recording/camera-rgb-rectified-1200-h2400+camera-slam-*-rectified-180-h480"
+# SLAM folder names: Gen 1 "camera-slam-{left,right}-...", Gen 2 "slam-{front,side}-*"
+# The *slam-* glob covers both.
+scene_name="recording/camera-rgb-rectified-1200-h2400+*slam-*-rectified-180-h480"
 
 wandb_project_name="aria_scene_benchmark"
 output_dir=./output/$scene_name

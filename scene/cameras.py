@@ -27,6 +27,22 @@ from utils.aria_utils import interpolate_aria_pose
 from utils.point_utils import project
 
 
+# Aria SLAM camera labels differ by device generation:
+#   Gen 1: "camera-slam-left",  "camera-slam-right"
+#   Gen 2: "slam-front-left",   "slam-front-right",
+#          "slam-side-left",    "slam-side-right"
+# The training side never sees the device itself -- only the label recorded in
+# transforms.json -- so recognise both naming schemes by prefix. A plain
+# startswith("camera-slam") test silently misclassified every Gen 2 SLAM camera
+# as RGB, which then handed a 3-channel vignette to a 1-channel image.
+_SLAM_LABEL_PREFIXES = ("camera-slam", "slam-")
+
+
+def is_slam_camera_label(camera_label: str) -> bool:
+    """True for an Aria SLAM (monochrome, global-shutter) camera, either generation."""
+    return camera_label.startswith(_SLAM_LABEL_PREFIXES)
+
+
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
 
@@ -95,9 +111,9 @@ class Camera:
         image_name: str = None,
         image_path: str = None,
         mask_path: str = None,
-        camera_name: Literal[
-            "camera-rgb", "camera-slam-left", "camera-slam-right"
-        ] = "camera-rgb",
+        # Gen 1: camera-rgb, camera-slam-left/right
+        # Gen 2: camera-rgb, slam-front-left/right, slam-side-left/right
+        camera_name: str = "camera-rgb",
         camera_projection_model: Literal["linear", "spherical"] = "linear",
         camera_modality: Literal["rgb", "monochrome"] = "rgb",
         exposure_duration_s: float = 1.0,
@@ -194,7 +210,7 @@ class Camera:
         vignette_image = np.array(Image.open(str(vignette_image_path))) / 255.0
 
         # only choose one channel for slam camera
-        if camera_name.startswith("camera-slam"):
+        if is_slam_camera_label(camera_name):
             vignette = torch.from_numpy(vignette_image[..., 0]).float()
         else:
             if vignette_image.ndim == 2:
@@ -713,17 +729,16 @@ class Camera:
 
 class AriaCamera(Camera):
     """
-    A physical moving camera (for Aria Gen 1 camera)
+    A physical moving camera (Aria Gen 1 or Gen 2)
+
+    Readout time is not stored here -- it arrives per frame via readout_time_ns,
+    derived from the preprocessed transforms.json, which in turn sources it from
+    the MPS online calibration. That keeps this class resolution- and
+    generation-agnostic.
     """
 
     _rs_row_index_image: Dict[str, torch.Tensor] = {}
     _rs_row_index_masks: List[SubImageMask] = []
-
-    # the read out time for an image at different resolution
-    _readout_time_calib = {
-        "full": int(16.26 * 1e6),  # The full resolution for Aria Gen 1 RGB camera 2880x2880
-        "half": int(5 * 1e6),  # The half resolution for Aria Gen 1 RGB camera 1408x1408
-    }
 
     # the sampling frequency in time (ns) we use to calculate the potential offset
     _motion_sample_max = 2 * 1e6  
