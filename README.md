@@ -281,3 +281,4 @@ Reconstruction quality is defined by what you do while capturing your vrs.
 - Revisit viewpoints so loop closure has something to close on.
 - Gen 2 has no exposure-capped profile, where Gen 1 used Profile 31. For motion blur, use
   a custom profile with `fixed_exposure` or `blur_filter_config`.
+. 
