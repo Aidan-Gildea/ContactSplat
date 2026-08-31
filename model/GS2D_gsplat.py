@@ -220,7 +220,19 @@ class Gaussians2D(VanillaGSplat):
             )
         elif self.cfg.opt.densification_strategy == "MCMC":
             print("Use MCMC training strategy")
-            self.densification_strategy = MCMCStrategy()
+            # Mirror VanillaGSplat._create_strategy: construct the strategy from
+            # the config block. A bare MCMCStrategy() silently ignores
+            # opt.mcmc_strategy.* (gsplat's default cap_max is 1,000,000), so
+            # the configured Gaussian budget would not be honored.
+            opt = self.cfg.opt.mcmc_strategy
+            self.densification_strategy = MCMCStrategy(
+                cap_max=opt.cap_max,
+                noise_lr=opt.noise_lr,
+                refine_start_iter=opt.mcmc_refine_start_iter,
+                refine_stop_iter=opt.mcmc_refine_stop_iter,
+                refine_every=opt.mcmc_refine_every,
+                min_opacity=opt.mcmc_min_opacity,
+            )
             self.strategy_state = self.densification_strategy.initialize_state()
         else:
             raise NotImplementedError(
@@ -332,13 +344,12 @@ class Gaussians2D(VanillaGSplat):
             renders = self.render(
                 train_cam, sh_degree=self.sh_degree_to_use, is_training=True
             )
-        except:
+        except Exception:
+            # Re-raise with context. The previous handler returned undefined
+            # `loss`/`image`, which masked any real rendering error behind a
+            # NameError.
             print(f"encounter issue to render training camera for {image_id}.")
-            return {
-                "loss": loss,
-                "render": image,
-            }
-            # change to a different camera id
+            raise
 
         train_cam.render_depth_min = renders["depth"].min().item()
 

@@ -669,33 +669,13 @@ def run_single_sequence(
                 )
                 rectified_frames.append(rec_frame)
 
-        # Generate sparse depth map for SLAM camera stream using semi-dense point cloud and tracker information
-        # Membership test rather than a "camera-slam" prefix check: Gen 2 SLAM
-        # labels are "slam-front-*" / "slam-side-*" and would silently fail a
-        # prefix test, skipping depth generation entirely with no error.
-        if (
-            camera_label in slam_labels
-            and df_semidense_observations is not None
-            and rectified_camera_model == "linear"
-        ):
-            device_serial_num = camera_serial_map[camera_label]
-            df_cam_observations2d = df_semidense_observations[
-                df_semidense_observations["camera_serial"] == device_serial_num
-            ]
-
-            print(
-                f"==> There are a total of {len(df_cam_observations2d)} 2d tracked points"
-            )
-
-            rectified_frames = create_visible_depth_map(
-                df_observations2d=df_cam_observations2d,
-                points3d=semidense_map,
-                frames=rectified_frames,
-                camera_label=camera_label,
-                image_folder=rectified_image_folder,
-                options=options,
-            )
-
+        # NOTE: sparse depth for the SLAM cameras used to be generated here as
+        # well as in the dedicated pass further down, running the single most
+        # expensive stage of preprocessing twice per camera and discarding the
+        # first result (this transforms.json is only ever read back by that
+        # same pass, which recomputes depth from scratch). Generated once now,
+        # below, into transforms_with_sparse_depth.json -- which is the file
+        # training actually consumes.
         with open(transform_json_path, "w") as f:
             json.dump(
                 {
@@ -942,6 +922,33 @@ def fetch_visible_depth_map_for_RGB(
     return rgb_camera_info
 
 
+# Flattening the semi-dense map into parallel arrays is what makes the
+# per-frame projection vectorisable. It is the same for every camera, so it is
+# built once and cached on the identity of the map itself.
+_POINT_ARRAY_CACHE = {}
+
+
+def _point_arrays(points3d):
+    """(uids_sorted, positions, inverse_distance_std, distance_std) for a semi-dense map."""
+    cached = _POINT_ARRAY_CACHE.get(id(points3d))
+    if cached is not None and cached[0] == len(points3d):
+        return cached[1:]
+
+    uids = np.fromiter(points3d.keys(), dtype=np.int64, count=len(points3d))
+    uids.sort()
+    positions = np.empty((uids.size, 3), dtype=np.float64)
+    inv_std = np.empty(uids.size, dtype=np.float64)
+    dist_std = np.empty(uids.size, dtype=np.float64)
+    for i, uid in enumerate(uids):
+        point = points3d[uid]
+        positions[i] = point.position_world
+        inv_std[i] = point.inverse_distance_std
+        dist_std[i] = point.distance_std
+
+    _POINT_ARRAY_CACHE[id(points3d)] = (len(points3d), uids, positions, inv_std, dist_std)
+    return uids, positions, inv_std, dist_std
+
+
 def create_visible_depth_map(
     df_observations2d,
     points3d,
@@ -979,6 +986,10 @@ def create_visible_depth_map(
     match_tolerance_us = 16_000
     matched_frame_count = 0
 
+    all_uids, all_positions, all_inv_std, all_dist_std = _point_arrays(points3d)
+    behind_camera_count = 0
+    unresolved_uid_count = 0
+
     for frame in frames:
 
         frame_timestamp_us = frame["timestamp"] / 1e3
@@ -1005,7 +1016,7 @@ def create_visible_depth_map(
             ]
 
         # get the corresponding point cloud in a device local frame
-        uids = frame_data2d["uid"].tolist()
+        uids = frame_data2d["uid"].to_numpy()
 
         c2w = np.array(frame["transform_matrix"])
         w2c = np.linalg.inv(c2w)
@@ -1015,27 +1026,48 @@ def create_visible_depth_map(
         frame_h = frame["h"]
         frame_w = frame["w"]
 
-        frame_pts3d = {
-            "u": [],
-            "v": [],
-            "z": [],
-            "inverseDistanceStd": [],
-            "distanceStd": [],
-            "uid": [],
-        }
-        for uid in uids:
-            pt3d = points3d[uid].position_world
+        # Project this frame's observed points in one shot. This used to be a
+        # Python loop calling project() once per point -- ~5.7k points across
+        # ~6.3k matched frames per recording, which dominated preprocessing.
+        if uids.size:
+            rows = np.searchsorted(all_uids, uids)
+            np.clip(rows, 0, all_uids.size - 1, out=rows)
+            resolved = all_uids[rows] == uids  # uid actually present in the map
+            rows = rows[resolved]
+            kept_uids = uids[resolved]
+            unresolved_uid_count += int((~resolved).sum())
 
-            u, v, z, _ = project(pt3d[:, None], w2c, calibK, frame_h, frame_w)
+            u, v, z, mask = project(
+                all_positions[rows].T, w2c, calibK, frame_h, frame_w
+            )
 
-            if u is not None:
-                frame_pts3d["u"].append(u[0])
-                frame_pts3d["v"].append(v[0])
-                frame_pts3d["z"].append(z[0])
-                frame_pts3d["inverseDistanceStd"].append(
-                    points3d[uid].inverse_distance_std
-                )
-                frame_pts3d["distanceStd"].append(points3d[uid].distance_std)
+            # Diagnostic for the sign bug fixed in utils.point_utils.project:
+            # points landing inside the image but sitting behind the camera.
+            # The old scalar branch accepted these with a negative depth.
+            pt_cam = w2c[:3, :3] @ all_positions[rows].T + w2c[:3, 3:]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                u_all = frame["fx"] * pt_cam[0] / pt_cam[2] + frame["cx"]
+                v_all = frame["fy"] * pt_cam[1] / pt_cam[2] + frame["cy"]
+            in_bounds = (u_all > 0) & (u_all < frame_w) & (v_all > 0) & (v_all < frame_h)
+            behind_camera_count += int((in_bounds & (pt_cam[2] <= 0)).sum())
+
+            frame_pts3d = {
+                "u": u.tolist(),
+                "v": v.tolist(),
+                "z": z.tolist(),
+                "inverseDistanceStd": all_inv_std[rows][mask].tolist(),
+                "distanceStd": all_dist_std[rows][mask].tolist(),
+                "uid": kept_uids[mask].tolist(),
+            }
+        else:
+            frame_pts3d = {
+                "u": [],
+                "v": [],
+                "z": [],
+                "inverseDistanceStd": [],
+                "distanceStd": [],
+                "uid": [],
+            }
 
         if options.visualize:
             image = np.array(Image.open(image_folder / frame["image_path"]))
@@ -1073,6 +1105,17 @@ def create_visible_depth_map(
                 f"==> WARNING: no observations matched any {camera_label} frame. "
                 "Sparse depth will be empty. Check that the MPS observation file "
                 "corresponds to this recording."
+            )
+        if behind_camera_count:
+            print(
+                f"==> {camera_label}: rejected {behind_camera_count} in-bounds "
+                "projections of points behind the camera (these were accepted "
+                "with negative depth before the project() sign fix)"
+            )
+        if unresolved_uid_count:
+            print(
+                f"==> {camera_label}: {unresolved_uid_count} observed uids were "
+                "absent from the semi-dense point cloud and were skipped"
             )
 
     return frames

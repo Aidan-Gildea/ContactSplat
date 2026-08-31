@@ -604,12 +604,19 @@ class VanillaGSplat(L.LightningModule):
         elif self.cfg.opt.densification_strategy == "MCMC":
             print("Use MCMC training strategy")
             opt = self.cfg.opt.mcmc_strategy
+            # The mcmc_* prefixes match conf/opt/*.yaml. These were previously
+            # read as opt.refine_start_iter / refine_stop_iter / min_opacity,
+            # which do not exist under `mcmc_strategy` -- so selecting
+            # densification_strategy=MCMC raised ConfigAttributeError before
+            # training could start. refine_every was defined in the config but
+            # never passed through.
             self.densification_strategy = MCMCStrategy(
                 cap_max=opt.cap_max,
                 noise_lr=opt.noise_lr,
-                refine_start_iter=opt.refine_start_iter,
-                refine_stop_iter=opt.refine_stop_iter,
-                min_opacity=opt.min_opacity,
+                refine_start_iter=opt.mcmc_refine_start_iter,
+                refine_stop_iter=opt.mcmc_refine_stop_iter,
+                refine_every=opt.mcmc_refine_every,
+                min_opacity=opt.mcmc_min_opacity,
             )
             self.strategy_state = self.densification_strategy.initialize_state()
         else:

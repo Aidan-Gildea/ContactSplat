@@ -64,19 +64,47 @@ def storePly(path: str, xyz: np.ndarray, rgb: np.ndarray, normals: np.ndarray=No
 
 
 def project(point3d: np.ndarray, T_w2c: np.ndarray, calibK: np.ndarray, frame_h: int, frame_w: int):
+    """Project world points into a pinhole camera, keeping only in-frustum hits.
+
+    `point3d` is (3, N) for a batch, or (3,) for a single point. A batch returns
+    (u, v, z) already filtered plus the boolean mask used to filter them, so
+    callers can select their own per-point attributes with the same mask. A
+    single point returns scalars, or four Nones if it is not visible.
+
+    Two things this used to get wrong:
+
+    * The visibility test was branched on `point3d.shape[-1] > 1`, so a batch
+      that happened to contain exactly one point (or none) fell into the scalar
+      branch and returned mask=None -- which every batched caller then used as
+      an index. Rank is what distinguishes the two cases, not batch size.
+    * The scalar test read `u < 0 or u >= w-1 or v < 0 or v >= h-1 and z > 0`.
+      `and` binds tighter than `or`, so `z > 0` applied only to the last clause
+      and points BEHIND the camera were never rejected. Such a point projects
+      to a sign-flipped u,v that can land inside the image, so it was accepted
+      and written into sparse depth with a negative depth.
+    """
+    single = point3d.ndim == 1
+    pts = point3d.reshape(3, 1) if single else point3d
+
     rot = T_w2c[:3, :3]
     t = T_w2c[:3, 3:]
-    point3d_cam = rot @ point3d + t
-    point3d_proj = calibK @ point3d_cam 
+    point3d_cam = rot @ pts + t
+    point3d_proj = calibK @ point3d_cam
 
-    u_proj = point3d_proj[0] / point3d_proj[2] 
-    v_proj = point3d_proj[1] / point3d_proj[2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u_proj = point3d_proj[0] / point3d_proj[2]
+        v_proj = point3d_proj[1] / point3d_proj[2]
     z = point3d_proj[2]
-    
-    if point3d.shape[-1] > 1:
-        mask = (u_proj > 0) * (u_proj < frame_w) * (v_proj > 0) * (v_proj < frame_h) * (z > 0)
-        return u_proj[mask > 0], v_proj[mask > 0], z[mask > 0], mask
-    else:
-        if u_proj < 0 or u_proj >= frame_w -1 or v_proj < 0 or v_proj >= frame_h - 1 and z > 0: 
+
+    mask = (
+        (u_proj > 0) & (u_proj < frame_w)
+        & (v_proj > 0) & (v_proj < frame_h)
+        & (z > 0)
+    )
+
+    if single:
+        if not mask[0]:
             return None, None, None, None
-        return u_proj, v_proj, z, None
+        return u_proj[0], v_proj[0], z[0], None
+
+    return u_proj[mask], v_proj[mask], z[mask], mask
