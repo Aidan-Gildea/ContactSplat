@@ -445,8 +445,8 @@ class ViewerCustomized(Viewer):
             "full screen": None,
             "16:9": 16.0 / 9.0,
             "4:3": 4.0 / 3.0,
-            "1:1 (RGB)": 1.0,
-            "3:4 (SLAM)": 3.0 / 4.0,
+            "1:1 (Gen1 RGB / Gen2 SLAM)": 1.0,
+            "3:4 (Gen1 SLAM)": 3.0 / 4.0,
         }
 
         aspect_ratio_dropdown = self.server.gui.add_dropdown(

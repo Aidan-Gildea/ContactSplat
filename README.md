@@ -1,148 +1,187 @@
-<div align="center">
+# egocentric_splats — Aria Gen 2
 
-<h2> Photoreal Scene Reconstruction from an Egocentric Device </h2>
+Gaussian Splatting reconstruction from Project Aria recordings. Fork of
+[facebookresearch/egocentric_splats](https://github.com/facebookresearch/egocentric_splats)
+with Aria **Gen 2** support added.
 
-<a href="https://arxiv.org/abs/2506.04444"><img src="https://img.shields.io/badge/arxiv-red" alt="arXiv"></a>
-<a href="https://www.projectaria.com/photoreal-reconstruction/">
-  <img src="https://img.shields.io/badge/Photoreal_Reconstruction-project_page-blue" alt="Project Page">
-</a>
-<a href="https://explorer.projectaria.com/aria-scenes"><img src="https://img.shields.io/badge/Aria_Scene_Dataset-dataset_download-purple" alt="Aria Dataset"></a>
+Camera labels and rolling-shutter readout times are resolved from the recording, so Gen 1
+and Gen 2 both work with the same commands. See [docs/gen2.md](docs/gen2.md) for what
+changed.
 
-Zhaoyang Lv, Maurizio Monge, Ka Chen, Yufeng Zhu, Michael Goesele, Jakob Engel, Zhao Dong, Richard Newcombe
+Preprocessing runs on CPU. Training needs an NVIDIA GPU — `gsplat`'s rasterizer is CUDA,
+with no CPU or Metal backend.
 
-Reality Labs Research, Meta
+---
 
-ACM SIGGRAPH Conference 2025
+## 1. Setup
 
-</div>
+### Preprocessing only (any machine, no GPU)
 
-## Overview
+```bash
+conda create -n aria python=3.11
+conda activate aria
 
-This repository focuses on reconstructing photorealistic 3D scenes captured from an egocentric device. In contrast to off-the-shelf Gaussian Splatting reconstruction pipelines that use videos as input from structure-from-motion, we highlight two major innovations that are crucial for improving the reconstruction quality:
-
-- **Visual-inertial bundle adjustment (VIBA)**: Unlike the mainstream approach of treating an RGB camera as a frame-rate camera, VIBA allows us to calibrate the precise timestamps and movements of an RGB camera in a high-frequency trajectory format. This supports the system in precisely modeling the online RGB camera calibrations and the pixel movements of a rolling-shutter camera.
-
-- **Gaussian Splatting model**: We incorporate a physical image formation model based on the Gaussian Splatting algorithm, which effectively addresses sensor characteristics, including the rolling-shutter effect of RGB cameras and the dynamic ranges measured by the sensors. This formulation is general to other variants of rasterization-based techniques.
-
-In this repository, we provide comprehensive guidelines for using the data recorded by the Aria Gen 1 device. We acquire the VIBA input from the [machine perception services](https://facebookresearch.github.io/projectaria_tools/docs/ARK/mps) provided by the Project Aria platform. Below, we offer detailed guidance on preprocessing the recordings and reconstructing them using several major variants of the Gaussian Splatting algorithms. In addition to reconstructing scenes using RGB sensors, we also provide examples of using SLAM cameras or combining all cameras together.
-
-```
-@inproceedings{lv2025egosplats,
-    title={Photoreal Scene Reconstruction from an Egocentric Device},
-    author={Lv, Zhaoyang and Monge, Maurizio and Chen, Ka and Zhu, Yufeng and Goesele, Michael and Engel, Jakob and Dong, Zhao and Newcombe, Richard},
-    booktitle={ACM SIGGRAPH}
-    year={2025}
-}
+pip install projectaria-tools projectaria-mps
+pip install opencv-python numpy pandas pillow rerun-sdk tqdm
 ```
 
-## Quick start
+### Training (Linux + NVIDIA GPU)
 
-``` bash
+```bash
 conda create -n ego_splats python=3.10
 conda activate ego_splats
 
-# Install pytorch (tested version). Choose a version that is compatible with your system
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-
 pip install -r requirements.txt
+
+# gsplat builds CUDA extensions on first use
+nvidia-smi
+python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-## Download exemplar Aria scene recording
+---
 
-Register on project aria dataset and get your download file at [Photoreal Reconstruction Project Aria](https://www.projectaria.com/photoreal-reconstruction/).
+## 2. Record and run MPS
 
-``` bash
-# the path to the downloadable cdn file
-DOWNLOAD_CDN_FILE=AriaScenes_download_urls.json
-# download one of the exemplar sequence (this will take about 16GB disk space)
-python scripts/downloader.py --cdn_file $DOWNLOAD_CDN_FILE -o data/aria_scenes --sequence_names livingroom
+Record with **profile10** (RGB 2016x1512 @ 30 Hz). profile8 also works.
 
-# download all the sequences (this will take about 114GB disk space)
-python scripts/downloader.py --cdn_file $DOWNLOAD_CDN_FILE -o data/aria_scenes
+```bash
+conda activate aria
+
+# validate the recording first
+run_vrs_health_check --path "my_recording.vrs"
+
+# bundle-adjusted poses + semi-dense points (cloud, ~30 min)
+aria_mps single -i "my_recording.vrs" --features SLAM
 ```
 
-You can browse the scene using the [Aria Scene Explorer](https://explorer.projectaria.com/aria-scenes).
+Produces `mps_my_recording_vrs/slam/` containing `closed_loop_trajectory.csv`,
+`semidense_points.csv.gz`, `semidense_observations.csv.gz` and `online_calibration.jsonl`.
+All four are required below.
 
-## Run on a Project Aria recording
+---
 
-### Preprocess the Aria VRS recording with machine perception tool
+## 3. Preprocess
 
-We provided an exemplar script to preprocess the Aria VRS recording with the machine perception tool (with input of the semidense point cloud, closed loop trajectories and the online calibration files). Assume you have the examplar scene "livingroom" downloaded according to the previous step in the "data/aria_scenes" path, you can run
-
-``` bash
-bash scripts/bash_local/run_vrs_preprocessing.sh
+```bash
+# edit the paths at the top of the script first
+bash scripts/bash_local/run_vrs_preprocessing_gen2.sh
 ```
 
-For more details that happened during the preprocessing, check [Preprocess Aria video](docs/preprocess_aria_video.md)
+Or call it directly:
 
-### Run Gaussian-splatting algorithm
+```bash
+MPS_FOLDER="/path/to/mps_my_recording_vrs/slam"
 
-We provided an exemplar training script following the above preprocessing script. This is the standard setting we used in the paper.
-``` bash
-# Run 3D GS reconstruction using RGB camera only
-bash scripts/bash_local/run_aria_rgb_camera.sh
+python scripts/extract_aria_vrs.py \
+    --input_root  "/path/to/recordings" \
+    --output_root "/path/to/processed" \
+    --vrs_file    "my_recording.vrs" \
+    --rectified_rgb_focal 1280 \
+    --rectified_rgb_size 1920 \
+    --rectified_monochrome_focal 180 --rectified_monochrome_height 512 \
+    --online_calib_file  "$MPS_FOLDER/online_calibration.jsonl" \
+    --trajectory_file    "$MPS_FOLDER/closed_loop_trajectory.csv" \
+    --semi_dense_points_file      "$MPS_FOLDER/semidense_points.csv.gz" \
+    --semi_dense_observation_file "$MPS_FOLDER/semidense_observations.csv.gz"
 ```
 
-During training, the model wil launch an online visualizer at "http://0.0.0.0:8080". Open browser to check the reconstruction results interactively.
+Quote all paths — Aria Studio puts spaces in recording names.
 
-In addition, we also provided a few settings that we did not use in the paper, but leveraged the capabilities of Aria videos, including using the SLAM (monochrome) camera inputs, using multi-modal cameras inputs, and other variants of Gaussian Splatting algorithm.
+`--rectified_rgb_size` is the output **height**; width follows the source aspect ratio.
+Horizontal FOV is `2 * atan((width / 2) / focal)`, so focal 1280 at width 2560 gives 90
+degrees. Gen 2 RGB covers 133 degrees, more than a pinhole can represent, so some
+cropping is unavoidable.
 
-#### Option 1: training using aria SLAM camera only
+Optional flags:
 
-We can run the same reconstruction process on the SLAM cameras, which are global shutter monochrome cameras. There are two of them on Project Aria Gen1 devices, which offer better field of view coverage (with limited overlap between them though). For certain applications, e.g. geometry reconstruction, this may offer more advantage over the RGB cameras.
-``` bash
-# Run 3D GS reconstruction using (two) SLAM cameras only
-# --train_model: choose 3dgs or 2dgs.
-# --strategy: default or MCMC.
-# example:
-bash scripts/bash_local/run_aria_slam_camera.sh --train_model 3dgs --strategy default
-
-# or using 2d-gs
-bash scripts/bash_local/run_aria_slam_camera.sh --train_model 2dgs --strategy default
+```bash
+--visualize                          # stream each stage to a rerun viewer
+--overwrite                          # regenerate instead of skipping existing output
+--extract_fisheye                    # equidistant fisheye output instead of pinhole
+--timestamp_convention readout_start # reproduce upstream's half-readout pose bias
 ```
 
-#### Option 2: Using both RGB and SLAM modalities jointly
-In addition, we can combine the RGB camera and SLAM cameras jointly in the reconstruction. We will reconstruct a RGBM radiance field with shared geometry structure.
-``` bash
-# has not been checked-in or tested
-# --train_model: choose 3dgs or 2dgs.
-# --strategy: default or MCMC.
-bash scripts/local/run_aria_all_cameras.sh
+Output:
+
+```
+processed/my_recording/
+├── camera-rgb-rectified-1280-h1920/        # training reads this
+│   ├── images/  sparse_depth/
+│   ├── transforms.json  transforms_with_sparse_depth.json
+│   └── vignette.png  mask.png  image_index.png
+└── slam-{front,side}-{left,right}-rectified-180-h512/
 ```
 
-Note: with fixed number of training iterations, this does not necessarily offer better view synthesis results over RGB or SLAM channel quantitatively, but you may find it provides reconstruction with less floaters by using all the cameras from different views.
+Check the run before training — these three must match the image size exactly:
 
-## Visualize the reconstruction via interactive viewer
-
-We provide an interactive viewer to visualize the trained models. For example, after launching the training scripts above, you can visualize all the models using
-``` bash
-python launch_viewer.py model_root=output/recording/camera-rgb-rectified-1200-h2000/
+```bash
+cd processed/my_recording/camera-rgb-rectified-1280-h1920
+python - <<'EOF'
+from PIL import Image
+import glob, json
+print('image   ', Image.open(sorted(glob.glob('images/*.png'))[0]).size)
+for f in ['vignette.png', 'mask.png', 'image_index.png']:
+    print(f'{f:16s}', Image.open(f).size)
+d = json.load(open('transforms_with_sparse_depth.json'))
+print('frames  ', len(d['frames']))
+print('readout ', d['frames'][0]['timestamp_read_end'] - d['frames'][0]['timestamp_read_start'], 'ns')
+EOF
 ```
 
-In default, it will show the visualizer at "http://0.0.0.0:8080". Open browser to check the results interactively.
+Console prints an observation match rate per SLAM camera. `0%` means sparse depth is empty
+and depth supervision does nothing. ~33% is normal (MPS tracks at 10 Hz, SLAM records at
+30 Hz).
 
-## Render video 
+---
 
-We provide an example script to render the video from the trained model. Check the script for more details.
+## 4. Train
 
-``` bash
-bash scripts/bash_local/run_aria_render.sh 
+```bash
+conda activate ego_splats
+
+# scene_name must match the rectified folder name from step 3
+python train_lightning.py \
+    train_model=3dgs opt=simple_gsplat_30K \
+    opt.densification_strategy=default \
+    opt.handle_rolling_shutter=true \
+    scene.data_root=/path/to/processed \
+    scene.scene_name="my_recording/camera-rgb-rectified-1280-h1920" \
+    scene.input_format="aria" \
+    output_root=./output \
+    viewer.use_trainer_viewer=true
 ```
 
-## Capture your own videos 
+Viewer at `http://0.0.0.0:8080` during training. Output PLY lands in
+`output/<scene_name>/<exp>/point_cloud/iteration_30000/point_cloud.ply`.
 
-Please refer to [Project Aria Docs](https://facebookresearch.github.io/projectaria_tools/docs/intro) and [Aria Research Kit](https://www.projectaria.com/research-kit/) for more details on capturing videos, running machine perception services to get the calibration and location metadata. 
+Train on RGB only if you plan to export elsewhere. The SLAM-camera and joint RGB+mono
+modes emit PLYs with 1 or 4 colour channels instead of 3, which no external tool reads —
+including `3dgrut` for NuRec / Isaac Sim.
 
-To capture the videos, we used the Profile 31 which supports full resolution RGB camera with maximum exposure capped at 3ms. For outdoor scenes, we should generally support all variants of profiles. For indoor videos, this might lead to relatively darker video input if the scene is not sufficiently illuminated, but you may have a chance to recover the full dynamic range of the scene after reconstruction. If you have questions about how to get the best practice for a specific scenario, feel free to make an issue request and we will be happy to help providing some inputs. 
+SLAM cameras are still used during preprocessing, where they generate the RGB sparse
+depth.
 
-## License
+---
 
-This implementation is Creative Commons licensed, as found in the LICENSE file.
+## 5. View and render
 
-The work built in this repository benefits from the great work in the following open-source projects: 
+```bash
+# interactive viewer on a trained model
+python launch_viewer.py model_root=output/my_recording/camera-rgb-rectified-1280-h1920/
 
-* [Project Aria tool](https://github.com/facebookresearch/projectaria_tools): Apache 2.0 
-* [EgoLifter](https://github.com/facebookresearch/egolifter), Apache 2.0
-* [gsplats](https://github.com/nerfstudio-project/gsplat), Apache 2.0
-* [viser](https://github.com/nerfstudio-project/viser), Apache 2.0
-* [nerfview](https://github.com/nerfstudio-project/nerfview), Apache 2.0
+# render a video
+bash scripts/bash_local/run_aria_render.sh
+```
+
+---
+
+## Capture notes
+
+Reconstruction quality is set at capture time, not by any flag.
+
+- Walk. Rotating in place gives no baseline and depth becomes unobservable.
+- 2–5 minutes, multiple heights and angles.
+- Revisit viewpoints so loop closure has something to close on.
+- Gen 2 has no exposure-capped profile (Gen 1 used Profile 31). For motion blur, use a
+  custom profile with `fixed_exposure` or `blur_filter_config`.

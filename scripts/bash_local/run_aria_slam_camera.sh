@@ -9,7 +9,11 @@
 # An example to run the reconstruction scripts
 
 data_root=data/aria_scenes/livingroom
-scene_name="recording/camera-slam-*-rectified-180-h480"
+# Glob covers both device generations: Gen 1 SLAM folders are named
+# "camera-slam-{left,right}-...", Gen 2 "slam-{front,side}-{left,right}-...".
+# A pattern that matches zero folders fails deep inside aggregate_scene_infos
+# with an opaque np.concatenate error, so check the match before training.
+scene_name="recording/*slam-*-rectified-180-h480"
 
 wandb_project_name="aria_scene_benchmark"
 output_dir=./output/$scene_name

@@ -21,6 +21,9 @@ import projectaria_tools.core.sophus as sophus
 import rerun as rr
 
 from aria_utils import (
+    get_camera_labels,
+    get_device_generation,
+    get_readout_time_ns,
     get_rectified_mask,
     get_rectified_row_index,
     get_rectified_vignette_image,
@@ -68,8 +71,21 @@ def to_aria_image_frame(
     camera_label: str = "camera-rgb",
     use_factory_calib: bool = False,
     visualize: bool = True,
+    timestamp_convention: str = "center",
 ):
-    assert camera_label in ["camera-rgb", "camera-slam-left", "camera-slam-right"]
+    device_calib = provider.get_device_calibration()
+    camera_labels = get_camera_labels(device_calib)
+    valid_labels = [l for l in [camera_labels["rgb"], *camera_labels["slam"]] if l]
+    assert camera_label in valid_labels, (
+        f"{camera_label!r} is not a camera on this "
+        f"{device_calib.get_device_version().name} device. Available: {valid_labels}"
+    )
+
+    # Readout time is constant for a camera across a recording, so resolve it
+    # once here rather than per frame. See get_readout_time_ns for why this
+    # comes from MPS online calibration and not from the image height.
+    readout_time_ns = get_readout_time_ns(online_camera_calibs, camera_label)
+    half_readout_ns = readout_time_ns / 2
 
     def process_raw_data(frame_i: int, camera_label: str):
         stream_id = provider.get_stream_id_from_label(camera_label)
@@ -77,26 +93,35 @@ def to_aria_image_frame(
         sensor_data = provider.get_sensor_data_by_index(stream_id, frame_i)
         image_data, image_record = sensor_data.image_data_and_record()
 
-        # https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/temporal_alignment_of_sensor_data#images-formation-temporal-model-rolling-shutter-and-pls-artifact
-        if (
-            image_data.get_height() == 2880
-        ):  # RGB full resolution readout time is 16.26ms
-            capture_time_offset = 8.13 * 1e6
-        elif (
-            image_data.get_height() == 1408
-        ):  # RGB half resolution readout time is 5 ms
-            capture_time_offset = 2.5 * 1e6
-        elif (
-            image_data.get_height() == 480
-        ):  # slam camera is global shutter. readout is close to 0.
-            capture_time_offset = 0
+        # Timestamps bracketing the rolling-shutter readout (start, middle, end).
+        #
+        # Aria documents capture_timestamp_ns as marking the CENTER of exposure
+        # of the middle row, not the start of readout:
+        #   https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/device_timestamping
+        # and the Gen 2 MPS point-cloud spec likewise defines its frame
+        # timestamps as the "center of exposure". Treating it as the read start
+        # (as this repo originally did) biases every pose by half a readout --
+        # 8 ms on Gen 1 full-res, but 19 ms on Gen 2 profile8, which is a
+        # visible reprojection error at walking speed.
+        #
+        # "readout_start" reproduces the original upstream behaviour, for
+        # A/B comparison against the published results.
+        # Kept as integer nanoseconds: these values name the image files on disk
+        # and are later divided down to microseconds to join against the MPS
+        # observation table.
+        if timestamp_convention == "center":
+            capture_time_middle = image_record.capture_timestamp_ns
+            capture_time_start = int(round(capture_time_middle - half_readout_ns))
+            capture_time_end = int(round(capture_time_middle + half_readout_ns))
+        elif timestamp_convention == "readout_start":
+            capture_time_start = image_record.capture_timestamp_ns
+            capture_time_middle = int(round(capture_time_start + half_readout_ns))
+            capture_time_end = int(round(capture_time_start + 2 * half_readout_ns))
         else:
-            raise RuntimeError(f"Unknown image data size! {image_data.get_height()}")
-
-        # rgb camera timestamp during readout (start, middle, end)
-        capture_time_start = image_record.capture_timestamp_ns
-        capture_time_middle = capture_time_start + capture_time_offset
-        capture_time_end = capture_time_start + 2 * capture_time_offset
+            raise ValueError(
+                f"Unknown timestamp_convention {timestamp_convention!r}; "
+                "expected 'center' or 'readout_start'"
+            )
 
         exposure_duration_s = image_record.exposure_duration
         gain = image_record.gain
@@ -121,7 +146,8 @@ def to_aria_image_frame(
 
         # Get the device calibration
         if use_factory_calib:
-            device_calib = provider.get_device_calibration()
+            # device_calib is resolved once outside this closure -- it is static
+            # for a recording, so re-reading it per frame was wasted work.
             camera_calib = device_calib.get_camera_calib(camera_label)
         else:
             nearest_calib_idx = bisection_timestamp_search(
@@ -407,21 +433,29 @@ def run_single_sequence(
     device_factory_calib = vrs_provider.get_device_calibration()
 
     # create an AriaImageFrame for each image in the VRS.
+    #
+    # Camera labels are resolved from the device, not hardcoded: Gen 1 has two
+    # SLAM cameras ("camera-slam-left/right") while Gen 2 has four, under
+    # different names ("slam-front-left/right", "slam-side-left/right").
+    # This is the only place in the repo that enumerates cameras.
+    device_generation = get_device_generation(device_factory_calib)
+    device_camera_labels = get_camera_labels(device_factory_calib)
+    rgb_label = device_camera_labels["rgb"]
+    slam_labels = device_camera_labels["slam"]
+    print(
+        f"Detected {device_generation} device: "
+        f"rgb={rgb_label}, slam={slam_labels}"
+    )
+
     camera_process_list = []
     camera_serial_map = {}
-    if rectified_rgb_focal > 0:
-        camera_process_list.append("camera-rgb")
-        camera_serial_map["camera-rgb"] = device_factory_calib.get_camera_calib(
-            "camera-rgb"
-        ).get_serial_number()
+    if rectified_rgb_focal > 0 and rgb_label is not None:
+        camera_process_list.append(rgb_label)
     if rectified_monochrome_focal > 0:
-        camera_process_list.append("camera-slam-left")
-        camera_process_list.append("camera-slam-right")
-        camera_serial_map["camera-slam-left"] = device_factory_calib.get_camera_calib(
-            "camera-slam-left"
-        ).get_serial_number()
-        camera_serial_map["camera-slam-right"] = device_factory_calib.get_camera_calib(
-            "camera-slam-right"
+        camera_process_list.extend(slam_labels)
+    for camera_label in camera_process_list:
+        camera_serial_map[camera_label] = device_factory_calib.get_camera_calib(
+            camera_label
         ).get_serial_number()
 
     assert (
@@ -452,6 +486,7 @@ def run_single_sequence(
             camera_label=camera_label,
             visualize=options.visualize,
             use_factory_calib=options.use_factory_calib,
+            timestamp_convention=options.timestamp_convention,
         )
 
         ns_frames["camera_label"] = camera_label
@@ -480,7 +515,7 @@ def run_single_sequence(
     for camera_label in camera_process_list:
         print(f"Creating rectified frames for {camera_label}")
 
-        if camera_label == "camera-rgb":
+        if camera_label == rgb_label:
             rectified_image_folder = f"{camera_label}-rectified-{int(rectified_rgb_focal)}-h{rectified_rgb_size}"
         else:
             rectified_image_folder = f"{camera_label}-rectified-{int(rectified_monochrome_focal)}-h{rectified_monochrome_height}"
@@ -530,7 +565,18 @@ def run_single_sequence(
         frames = read_frames_from_metadata(transforms_json=input_json_path)
 
         # Read the vignette image, rectify and save the vignette image.
-        if camera_label == "camera-rgb":
+        if camera_label == rgb_label:
+            # output_w is deliberately NOT passed to any of these three.
+            #
+            # Gen 1 RGB was square (2880x2880 / 1408x1408), so forcing
+            # output_w == output_h was harmless. Gen 2 RGB is 4:3 (2560x1920 or
+            # 2016x1512). The rectified *images* derive their width from the
+            # source aspect ratio (aria_utils.process_frame), so pinning these
+            # three to a square would make the vignette, mask and row-index map
+            # disagree with the images they multiply against -- crashing at
+            # train time in Camera.vignette_image.expand_as().
+            #
+            # Both helpers already derive width correctly when output_w is None.
             vignette = get_rectified_vignette_image(
                 frame=frames[0],
                 input_root=Path("data"),
@@ -538,7 +584,7 @@ def run_single_sequence(
                 camera_model=rectified_camera_model,
                 output_focal=rectified_rgb_focal,
                 output_h=rectified_rgb_size,
-                output_w=rectified_rgb_size,
+                generation=device_generation,
             )
             Image.fromarray(vignette).save(rectified_image_folder / "vignette.png")
             mask = get_rectified_mask(
@@ -547,6 +593,7 @@ def run_single_sequence(
                 camera_model=rectified_camera_model,
                 output_focal=rectified_rgb_focal,
                 output_height=rectified_rgb_size,
+                generation=device_generation,
             )
             Image.fromarray(mask).save(rectified_image_folder / "mask.png")
 
@@ -555,7 +602,6 @@ def run_single_sequence(
                 camera_model=rectified_camera_model,
                 output_focal=rectified_rgb_focal,
                 output_h=rectified_rgb_size,
-                output_w=rectified_rgb_size,
             )
             Image.fromarray(image_index).save(rectified_image_folder / "image_index.png")
 
@@ -569,6 +615,7 @@ def run_single_sequence(
                 camera_model=rectified_camera_model,
                 output_focal=rectified_monochrome_focal,
                 output_h=rectified_monochrome_height,
+                generation=device_generation,
             )
             Image.fromarray(vignette).save(rectified_image_folder / "vignette.png")
 
@@ -580,6 +627,7 @@ def run_single_sequence(
                 camera_model=rectified_camera_model,
                 output_focal=rectified_monochrome_focal,
                 output_height=rectified_monochrome_height,
+                generation=device_generation,
             )
             Image.fromarray(mask).save(rectified_image_folder / "mask.png")
 
@@ -621,30 +669,13 @@ def run_single_sequence(
                 )
                 rectified_frames.append(rec_frame)
 
-        # Generate sparse depth map for SLAM camera stream using semi-dense point cloud and tracker information
-        if (
-            camera_label.startswith("camera-slam")
-            and df_semidense_observations is not None
-            and rectified_camera_model == "linear"
-        ):
-            device_serial_num = camera_serial_map[camera_label]
-            df_cam_observations2d = df_semidense_observations[
-                df_semidense_observations["camera_serial"] == device_serial_num
-            ]
-
-            print(
-                f"==> There are a total of {len(df_cam_observations2d)} 2d tracked points"
-            )
-
-            rectified_frames = create_visible_depth_map(
-                df_observations2d=df_cam_observations2d,
-                points3d=semidense_map,
-                frames=rectified_frames,
-                camera_label=camera_label,
-                image_folder=rectified_image_folder,
-                options=options,
-            )
-
+        # NOTE: sparse depth for the SLAM cameras used to be generated here as
+        # well as in the dedicated pass further down, running the single most
+        # expensive stage of preprocessing twice per camera and discarding the
+        # first result (this transforms.json is only ever read back by that
+        # same pass, which recomputes depth from scratch). Generated once now,
+        # below, into transforms_with_sparse_depth.json -- which is the file
+        # training actually consumes.
         with open(transform_json_path, "w") as f:
             json.dump(
                 {
@@ -667,7 +698,7 @@ def run_single_sequence(
     # For RGB camera view, we use the points in nearest SLAM camera view that is also within the frustum of RGB image.
     slam_transform_json_path = {}
     for camera_label in camera_process_list:
-        if camera_label.startswith("camera-slam"):
+        if camera_label in slam_labels:
 
             rectified_image_folder = (
                 output_path
@@ -716,7 +747,7 @@ def run_single_sequence(
     # Find the points in nearest SLAM camera view and filter those in frustum
     rgb_rectified_image_folder = (
         output_path
-        / f"camera-rgb-rectified-{int(rectified_rgb_focal)}-h{rectified_rgb_size}"
+        / f"{rgb_label}-rectified-{int(rectified_rgb_focal)}-h{rectified_rgb_size}"
     )
     if options.use_factory_calib:
         rgb_rectified_image_folder = Path(
@@ -734,8 +765,7 @@ def run_single_sequence(
     else:
         frames_with_depth = fetch_visible_depth_map_for_RGB(
             rgb_transform_json_path,
-            slam_transform_json_path["camera-slam-left"],
-            slam_transform_json_path["camera-slam-right"],
+            slam_transform_json_path,
             rgb_rectified_image_folder,
             options,
         )
@@ -746,34 +776,58 @@ def run_single_sequence(
 
 def fetch_visible_depth_map_for_RGB(
     rgb_transform_json_path,
-    slam_left_transform_json_path,
-    slam_right_transform_json_path,
+    slam_transform_json_paths: dict,
     image_folder,
     options,
 ):
+    """Project every SLAM camera's sparse depth into the RGB frustum.
+
+    RGB frames carry no semi-dense observations of their own, so for each RGB
+    frame we take the temporally nearest frame from each SLAM camera,
+    back-project its sparse points into world space, and re-project them into
+    the RGB view -- keeping whatever lands inside the frustum.
+
+    This loops over an arbitrary number of SLAM cameras. Gen 1 has two; Gen 2
+    has four, of which the side-facing pair mostly looks away from the RGB
+    camera. Those points are simply culled by project()'s in-frustum mask, so
+    the extra cameras cost a little work and can only add coverage.
+
+    `slam_transform_json_paths` maps camera label -> path to that camera's
+    transforms_with_sparse_depth.json.
+    """
     with open(rgb_transform_json_path, "r") as f:
         rgb_camera_info = json.load(f)
 
-    with open(slam_left_transform_json_path, "r") as f:
-        slam_left_camera_info = json.load(f)
+    rgb_label = rgb_camera_info["camera_label"]
 
-    with open(slam_right_transform_json_path, "r") as f:
-        slam_right_camera_info = json.load(f)
+    # Load each SLAM camera's frames and build its timestamp index once.
+    slam_cameras = {}
+    for slam_label, slam_json_path in slam_transform_json_paths.items():
+        with open(slam_json_path, "r") as f:
+            slam_camera_info = json.load(f)
+        slam_frames = slam_camera_info["frames"]
+        if not slam_frames:
+            print(f"==> {slam_label} has no frames; excluded from RGB sparse depth.")
+            continue
+        slam_cameras[slam_label] = {
+            "root": Path(slam_json_path).parent,
+            "frames": slam_frames,
+            "timestamps": np.asarray([fr["timestamp"] for fr in slam_frames]),
+        }
 
-    slam_left_timestamps = [
-        frame["timestamp"] for frame in slam_left_camera_info["frames"]
-    ]
-    slam_left_timestamps = np.asarray(slam_left_timestamps)
-
-    slam_right_timestamps = [
-        frame["timestamp"] for frame in slam_right_camera_info["frames"]
-    ]
-    slam_right_timestamps = np.asarray(slam_right_timestamps)
+    if not slam_cameras:
+        raise RuntimeError(
+            "No SLAM cameras with sparse depth are available, so RGB sparse "
+            "depth cannot be generated."
+        )
+    print(f"==> Building RGB sparse depth from {sorted(slam_cameras)}")
 
     sparse_depth_folder = image_folder / "sparse_depth"
     sparse_depth_folder.mkdir(exist_ok=True)
 
-    # find the nearest neighbor in the slam camera info
+    def _concat(chunks):
+        return np.concatenate(chunks, axis=0) if chunks else np.asarray([])
+
     for frame in rgb_camera_info["frames"]:
         rgb_timestamp = frame["timestamp"]
 
@@ -783,126 +837,76 @@ def fetch_visible_depth_map_for_RGB(
             [[frame["fx"], 0, frame["cx"]], [0, frame["fy"], frame["cy"]], [0, 0, 1]]
         )
 
-        # could be more precise checking closest time within the two, but may not be necessary here
-        slam_left_index = np.searchsorted(slam_left_timestamps, rgb_timestamp)
-        # slam_left_timestamp = slam_left_timestamps[slam_left_index]
-        if slam_left_index < len(slam_left_camera_info["frames"]):
-            slam_left_frame = slam_left_camera_info["frames"][slam_left_index]
-        else:
-            slam_left_frame = slam_left_camera_info["frames"][-1]
-        with open(
-            slam_left_transform_json_path.parent / slam_left_frame["sparse_depth"], "r"
-        ) as f:
-            slam_left_sparse_depth = json.load(f)
+        u_chunks, v_chunks, z_chunks = [], [], []
+        inv_dist_chunks, dist_std_chunks = [], []
 
-            u = np.asarray(slam_left_sparse_depth["u"])
-            v = np.asarray(slam_left_sparse_depth["v"])
-            z = np.asarray(slam_left_sparse_depth["z"])
-            inverse_distance_std = np.asarray(
-                slam_left_sparse_depth["inverseDistanceStd"]
+        for slam_label, slam in slam_cameras.items():
+            # Nearest SLAM frame in time. Could interpolate between the
+            # bracketing pair, but SLAM runs at 30 Hz so the error is small.
+            slam_index = np.searchsorted(slam["timestamps"], rgb_timestamp)
+            slam_index = min(slam_index, len(slam["frames"]) - 1)
+            slam_frame = slam["frames"][slam_index]
+
+            sparse_depth_rel = slam_frame.get("sparse_depth")
+            if sparse_depth_rel is None:
+                continue
+
+            with open(slam["root"] / sparse_depth_rel, "r") as f:
+                slam_sparse_depth = json.load(f)
+
+            u = np.asarray(slam_sparse_depth["u"])
+            if len(u) == 0:  # no visible point in this SLAM frame
+                continue
+
+            v = np.asarray(slam_sparse_depth["v"])
+            z = np.asarray(slam_sparse_depth["z"])
+            inverse_distance_std = np.asarray(slam_sparse_depth["inverseDistanceStd"])
+            distance_std = np.asarray(slam_sparse_depth["distanceStd"])
+
+            # Unproject from the SLAM camera's rectified pinhole model...
+            fx = slam_frame["fx"]
+            fy = slam_frame["fy"]
+            cx = slam_frame["cx"]
+            cy = slam_frame["cy"]
+            x = z * (u - cx) / fx
+            y = z * (v - cy) / fy
+
+            pt3d_slam = np.stack([x, y, z])
+            slam_c2w = np.asarray(slam_frame["transform_matrix"])
+            pt3d_world = slam_c2w[:3, :3] @ pt3d_slam + slam_c2w[:3, 3:]
+
+            # ...and reproject into the RGB view, keeping in-frustum points.
+            u_rgb, v_rgb, z_rgb, mask = project(
+                pt3d_world, rgb_w2c, rgb_calibK, frame["h"], frame["w"]
             )
-            distance_std = np.asarray(slam_left_sparse_depth["distanceStd"])
 
-            if len(u) > 0:
-                fx = slam_left_frame["fx"]
-                fy = slam_left_frame["fy"]
-                cx = slam_left_frame["cx"]
-                cy = slam_left_frame["cy"]
+            u_chunks.append(u_rgb)
+            v_chunks.append(v_rgb)
+            z_chunks.append(z_rgb)
+            inv_dist_chunks.append(inverse_distance_std[mask])
+            dist_std_chunks.append(distance_std[mask])
 
-                x = z * (u - cx) / fx
-                y = z * (v - cy) / fy
-                z = z
-
-                pt3d_slamleft = np.stack([x, y, z])
-                slam_left_c2w = np.asarray(slam_left_frame["transform_matrix"])
-                pt3d_left_world = (
-                    slam_left_c2w[:3, :3] @ pt3d_slamleft + slam_left_c2w[:3, 3:]
-                )
-
-                u_from_slam_left, v_from_slam_left, z_from_slam_left, mask = project(
-                    pt3d_left_world, rgb_w2c, rgb_calibK, frame["h"], frame["w"]
-                )
-                inv_dist_std_from_slam_left = inverse_distance_std[mask]
-                dist_std_from_slam_left = distance_std[mask]
-            else:
-                u_from_slam_left = np.asarray([])
-                v_from_slam_left = np.asarray([])
-                z_from_slam_left = np.asarray([])
-                inv_dist_std_from_slam_left = np.asarray([])
-                dist_std_from_slam_left = np.asarray([])
-
-        slam_right_index = np.searchsorted(slam_right_timestamps, rgb_timestamp)
-        if slam_right_index < len(slam_right_camera_info["frames"]):
-            slam_right_frame = slam_right_camera_info["frames"][slam_right_index]
-        else:
-            slam_right_frame = slam_right_camera_info["frames"][-1]
-        with open(
-            slam_right_transform_json_path.parent / slam_right_frame["sparse_depth"],
-            "r",
-        ) as f:
-            slam_right_sparse_depth = json.load(f)
-
-            u = np.asarray(slam_right_sparse_depth["u"])
-            v = np.asarray(slam_right_sparse_depth["v"])
-            z = np.asarray(slam_right_sparse_depth["z"])
-            inverse_distance_std = np.asarray(
-                slam_right_sparse_depth["inverseDistanceStd"]
-            )
-            distance_std = np.asarray(slam_right_sparse_depth["distanceStd"])
-
-            if len(u) > 0:  # no visible point.
-                fx = slam_right_frame["fx"]
-                fy = slam_right_frame["fy"]
-                cx = slam_right_frame["cx"]
-                cy = slam_right_frame["cy"]
-
-                x = z * (u - cx) / fx
-                y = z * (v - cy) / fy
-                z = z
-
-                pt3d_slamright = np.stack([x, y, z])
-                slam_right_c2w = np.asarray(slam_right_frame["transform_matrix"])
-                pt3d_right_world = (
-                    slam_right_c2w[:3, :3] @ pt3d_slamright + slam_right_c2w[:3, 3:]
-                )
-
-                u_from_slam_right, v_from_slam_right, z_from_slam_right, mask = project(
-                    pt3d_right_world, rgb_w2c, rgb_calibK, frame["h"], frame["w"]
-                )
-                inv_dist_std_from_slam_right = inverse_distance_std[mask]
-                dist_std_from_slam_right = distance_std[mask]
-            else:
-                u_from_slam_right = np.asarray([])
-                v_from_slam_right = np.asarray([])
-                z_from_slam_right = np.asarray([])
-                inv_dist_std_from_slam_right = np.asarray([])
-                dist_std_from_slam_right = np.asarray([])
-
-        u_rgb = np.concatenate([u_from_slam_left, u_from_slam_right], axis=0)
-        v_rgb = np.concatenate([v_from_slam_left, v_from_slam_right], axis=0)
-        z_rgb = np.concatenate([z_from_slam_left, z_from_slam_right], axis=0)
-        inv_dist_rgb = np.concatenate(
-            [inv_dist_std_from_slam_left, inv_dist_std_from_slam_right], axis=0
-        )
-        dist_std_rgb = np.concatenate(
-            [dist_std_from_slam_left, dist_std_from_slam_right], axis=0
-        )
+        u_rgb = _concat(u_chunks)
+        v_rgb = _concat(v_chunks)
+        z_rgb = _concat(z_chunks)
+        inv_dist_rgb = _concat(inv_dist_chunks)
+        dist_std_rgb = _concat(dist_std_chunks)
 
         if options.visualize:
             image = np.array(Image.open(image_folder / frame["image_path"]))
             rr.log(
-                f"camera-rgb/image",
+                f"{rgb_label}/image",
                 rr.Image(image).compress(jpeg_quality=70),
             )
 
             points2d = np.stack([u_rgb, v_rgb], axis=-1)
             rr.log(
-                f"camera-rgb/image/points_2D",
+                f"{rgb_label}/image/points_2D",
                 rr.Points2D(points2d, colors=[0, 200, 0], radii=2),
             )
 
         # save it as json file as well
-        depth_filename = f"sparse_depth/camera-rgb_{frame['timestamp']}.json"
+        depth_filename = f"sparse_depth/{rgb_label}_{frame['timestamp']}.json"
         with open(image_folder / depth_filename, "w") as f:
             frame_pts3d = {
                 "u": u_rgb.tolist(),
@@ -916,6 +920,33 @@ def fetch_visible_depth_map_for_RGB(
         frame["sparse_depth"] = depth_filename
 
     return rgb_camera_info
+
+
+# Flattening the semi-dense map into parallel arrays is what makes the
+# per-frame projection vectorisable. It is the same for every camera, so it is
+# built once and cached on the identity of the map itself.
+_POINT_ARRAY_CACHE = {}
+
+
+def _point_arrays(points3d):
+    """(uids_sorted, positions, inverse_distance_std, distance_std) for a semi-dense map."""
+    cached = _POINT_ARRAY_CACHE.get(id(points3d))
+    if cached is not None and cached[0] == len(points3d):
+        return cached[1:]
+
+    uids = np.fromiter(points3d.keys(), dtype=np.int64, count=len(points3d))
+    uids.sort()
+    positions = np.empty((uids.size, 3), dtype=np.float64)
+    inv_std = np.empty(uids.size, dtype=np.float64)
+    dist_std = np.empty(uids.size, dtype=np.float64)
+    for i, uid in enumerate(uids):
+        point = points3d[uid]
+        positions[i] = point.position_world
+        inv_std[i] = point.inverse_distance_std
+        dist_std[i] = point.distance_std
+
+    _POINT_ARRAY_CACHE[id(points3d)] = (len(points3d), uids, positions, inv_std, dist_std)
+    return uids, positions, inv_std, dist_std
 
 
 def create_visible_depth_map(
@@ -939,15 +970,53 @@ def create_visible_depth_map(
     sparse_depth_folder = image_folder / "sparse_depth"
     sparse_depth_folder.mkdir(exist_ok=True)
 
+    # Join frames to MPS observations on timestamp.
+    #
+    # This used to be an exact microsecond equality test, which only worked
+    # because Gen 1 half-readout times happen to be whole microseconds. Any
+    # recording whose half-readout is not an integer number of microseconds
+    # would match zero rows and produce an empty sparse depth map for EVERY
+    # frame -- silently, with no error, quietly disabling depth supervision.
+    # Match to the nearest observation timestamp within a tolerance instead.
+    observation_timestamps_us = np.sort(
+        df_observations2d["frame_tracking_timestamp_us"].unique()
+    )
+    # Half a SLAM frame period (30 Hz -> ~16.7 ms) is a generous bound that
+    # still cannot reach a neighbouring frame.
+    match_tolerance_us = 16_000
+    matched_frame_count = 0
+
+    all_uids, all_positions, all_inv_std, all_dist_std = _point_arrays(points3d)
+    behind_camera_count = 0
+    unresolved_uid_count = 0
+
     for frame in frames:
 
-        frame_data2d = df_observations2d[
-            df_observations2d["frame_tracking_timestamp_us"]
-            == int(frame["timestamp"] / 1e3)
-        ]
+        frame_timestamp_us = frame["timestamp"] / 1e3
+        matched_timestamp_us = None
+        if len(observation_timestamps_us) > 0:
+            insert_idx = np.searchsorted(observation_timestamps_us, frame_timestamp_us)
+            for candidate_idx in (insert_idx - 1, insert_idx):
+                if not 0 <= candidate_idx < len(observation_timestamps_us):
+                    continue
+                candidate = observation_timestamps_us[candidate_idx]
+                if abs(candidate - frame_timestamp_us) <= match_tolerance_us and (
+                    matched_timestamp_us is None
+                    or abs(candidate - frame_timestamp_us)
+                    < abs(matched_timestamp_us - frame_timestamp_us)
+                ):
+                    matched_timestamp_us = candidate
+
+        if matched_timestamp_us is None:
+            frame_data2d = df_observations2d.iloc[0:0]  # empty, same columns
+        else:
+            matched_frame_count += 1
+            frame_data2d = df_observations2d[
+                df_observations2d["frame_tracking_timestamp_us"] == matched_timestamp_us
+            ]
 
         # get the corresponding point cloud in a device local frame
-        uids = frame_data2d["uid"].tolist()
+        uids = frame_data2d["uid"].to_numpy()
 
         c2w = np.array(frame["transform_matrix"])
         w2c = np.linalg.inv(c2w)
@@ -957,27 +1026,48 @@ def create_visible_depth_map(
         frame_h = frame["h"]
         frame_w = frame["w"]
 
-        frame_pts3d = {
-            "u": [],
-            "v": [],
-            "z": [],
-            "inverseDistanceStd": [],
-            "distanceStd": [],
-            "uid": [],
-        }
-        for uid in uids:
-            pt3d = points3d[uid].position_world
+        # Project this frame's observed points in one shot. This used to be a
+        # Python loop calling project() once per point -- ~5.7k points across
+        # ~6.3k matched frames per recording, which dominated preprocessing.
+        if uids.size:
+            rows = np.searchsorted(all_uids, uids)
+            np.clip(rows, 0, all_uids.size - 1, out=rows)
+            resolved = all_uids[rows] == uids  # uid actually present in the map
+            rows = rows[resolved]
+            kept_uids = uids[resolved]
+            unresolved_uid_count += int((~resolved).sum())
 
-            u, v, z, _ = project(pt3d[:, None], w2c, calibK, frame_h, frame_w)
+            u, v, z, mask = project(
+                all_positions[rows].T, w2c, calibK, frame_h, frame_w
+            )
 
-            if u is not None:
-                frame_pts3d["u"].append(u[0])
-                frame_pts3d["v"].append(v[0])
-                frame_pts3d["z"].append(z[0])
-                frame_pts3d["inverseDistanceStd"].append(
-                    points3d[uid].inverse_distance_std
-                )
-                frame_pts3d["distanceStd"].append(points3d[uid].distance_std)
+            # Diagnostic for the sign bug fixed in utils.point_utils.project:
+            # points landing inside the image but sitting behind the camera.
+            # The old scalar branch accepted these with a negative depth.
+            pt_cam = w2c[:3, :3] @ all_positions[rows].T + w2c[:3, 3:]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                u_all = frame["fx"] * pt_cam[0] / pt_cam[2] + frame["cx"]
+                v_all = frame["fy"] * pt_cam[1] / pt_cam[2] + frame["cy"]
+            in_bounds = (u_all > 0) & (u_all < frame_w) & (v_all > 0) & (v_all < frame_h)
+            behind_camera_count += int((in_bounds & (pt_cam[2] <= 0)).sum())
+
+            frame_pts3d = {
+                "u": u.tolist(),
+                "v": v.tolist(),
+                "z": z.tolist(),
+                "inverseDistanceStd": all_inv_std[rows][mask].tolist(),
+                "distanceStd": all_dist_std[rows][mask].tolist(),
+                "uid": kept_uids[mask].tolist(),
+            }
+        else:
+            frame_pts3d = {
+                "u": [],
+                "v": [],
+                "z": [],
+                "inverseDistanceStd": [],
+                "distanceStd": [],
+                "uid": [],
+            }
 
         if options.visualize:
             image = np.array(Image.open(image_folder / frame["image_path"]))
@@ -1000,6 +1090,33 @@ def create_visible_depth_map(
             json.dump(frame_pts3d, f, indent=4)
 
         frame["sparse_depth"] = depth_filename
+
+    # Surface the join outcome. A 0% match rate means depth supervision is
+    # silently a no-op, which is otherwise invisible until training quality
+    # is mysteriously poor.
+    if frames:
+        match_rate = 100.0 * matched_frame_count / len(frames)
+        print(
+            f"==> {camera_label}: matched observations for "
+            f"{matched_frame_count}/{len(frames)} frames ({match_rate:.1f}%)"
+        )
+        if matched_frame_count == 0:
+            print(
+                f"==> WARNING: no observations matched any {camera_label} frame. "
+                "Sparse depth will be empty. Check that the MPS observation file "
+                "corresponds to this recording."
+            )
+        if behind_camera_count:
+            print(
+                f"==> {camera_label}: rejected {behind_camera_count} in-bounds "
+                "projections of points behind the camera (these were accepted "
+                "with negative depth before the project() sign fix)"
+            )
+        if unresolved_uid_count:
+            print(
+                f"==> {camera_label}: {unresolved_uid_count} observed uids were "
+                "absent from the semi-dense point cloud and were skipped"
+            )
 
     return frames
 
@@ -1065,14 +1182,19 @@ def main():
     parser.add_argument(
         "--rectified_rgb_focal",
         help="The rectified RGB image focal length. If set to <0, it will skip rectifying RGB images.\
-            For a 2880x2880 image, 1200 can be a default choice close to its original focal length. \
-            For a 1408x1408 image, 600 can be a default choice close to its original focal length.",
+            Aria Gen 1 (square RGB): 1200 for 2880x2880, 600 for 1408x1408. \
+            Aria Gen 2 (4:3 RGB): the native fisheye focal is ~1115 at 2560x1920, but the \
+            133x99 degree FOV far exceeds what a pinhole at that focal can cover, so a \
+            reduced focal is usually wanted. Derive it from the actual calibration rather \
+            than inheriting the Gen 1 numbers.",
         type=float,
         default=-1,
     )
     parser.add_argument(
         "--rectified_rgb_size",
-        help="The rectified RGB image size. It is square image of size^2",
+        help="The rectified RGB image HEIGHT. The width is derived from the source aspect \
+            ratio. (This used to force a square output, which was correct only for Gen 1's \
+            square RGB sensor; Gen 2 RGB is 4:3.)",
         type=int,
         default=2880,
     )
@@ -1098,6 +1220,17 @@ def main():
     )
     parser.add_argument(
         "--use_factory_calib", action="store_true", help="Use factory calibration"
+    )
+    parser.add_argument(
+        "--timestamp_convention",
+        choices=["center", "readout_start"],
+        default="center",
+        help="How to interpret image_record.capture_timestamp_ns. 'center' (default) treats \
+            it as the center of exposure of the middle row, which is what Aria documents. \
+            'readout_start' treats it as the start of readout, reproducing this repo's \
+            original behaviour -- useful for A/B comparison against the published results, \
+            but it biases every pose by half a readout (8 ms on Gen 1 full-res RGB, 19 ms \
+            on Gen 2 profile8).",
     )
     parser.add_argument(
         "--extract_fisheye",

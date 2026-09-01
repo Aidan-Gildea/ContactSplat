@@ -21,6 +21,7 @@ from scene.cameras import (
     focal2fov,
     interpolate_aria_pose,
     interpolate_fps_piecewise,
+    is_slam_camera_label,
 )
 
 from utils.point_utils import BasicPointCloud, project
@@ -159,6 +160,9 @@ def visualize_cameras_aria(
     cameras: List[Camera],
     point_cloud: BasicPointCloud,
     close_loop_traj,
+    # Gen 1 full-resolution RGB readout. Only a fallback for this debug
+    # visualiser, which is not called anywhere; pass the real value from the
+    # camera (Camera.readout_time_ns) if you wire it up.
     readout_time=16e6,
 ):
     """
@@ -404,7 +408,11 @@ def read_Aria_transform_json(
             )
             continue
 
-        if transforms["camera_label"].startswith("camera-slam"):
+        # Normalised to the literal "camera-slam" / "camera-rgb" regardless of
+        # the device generation's actual label, because downstream code selects
+        # the colour format by substring on these names
+        # (model/vanilla_gsplat.py: `if "slam" in label`).
+        if is_slam_camera_label(transforms["camera_label"]):
             camera_modality = "monochrome"
             camera_names.update(["camera-slam"])
             is_rolling_shutter = False

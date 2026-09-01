@@ -18,6 +18,128 @@ from PIL import Image
 from projectaria_tools.core import calibration
 from projectaria_tools.core.sophus import interpolate, SE3
 
+
+# ---------------------------------------------------------------------------
+# Aria device generation handling
+#
+# This repo was written for Aria Gen 1, which has exactly two SLAM cameras
+# named "camera-slam-left" / "camera-slam-right". Gen 2 renamed them and added
+# a second, side-facing pair:
+#
+#   Gen 1                  Gen 2
+#   camera-slam-left   ->  slam-front-left
+#   camera-slam-right  ->  slam-front-right
+#   (none)                 slam-side-left
+#   (none)                 slam-side-right
+#   camera-rgb         ->  camera-rgb        (unchanged)
+#
+# Labels are resolved from the device rather than hardcoded, so one code path
+# serves both generations. StreamIds are deliberately NOT used: several are
+# reassigned between generations (e.g. Gen 1 has 1202-1 = imu-right while
+# Gen 2 has 1202-1 = imu-left), and the on-device machine-perception streams
+# are assigned dynamically at recording time.
+#
+# Gen 2 StreamId <-> label mapping:
+# https://facebookresearch.github.io/projectaria_tools/gen2/technical-specs/vrs/streamid-label-mapper
+# ---------------------------------------------------------------------------
+
+RGB_LABEL = "camera-rgb"  # unchanged across generations
+
+# Candidate SLAM labels per generation, front pair first. On Gen 2 the side
+# cameras point away from the RGB frustum, so they contribute comparatively few
+# points to the RGB sparse depth map -- but they cost nothing extra to include.
+_SLAM_LABEL_CANDIDATES = {
+    "Gen1": ["camera-slam-left", "camera-slam-right"],
+    "Gen2": [
+        "slam-front-left",
+        "slam-front-right",
+        "slam-side-left",
+        "slam-side-right",
+    ],
+}
+
+
+def get_device_generation(device_calib) -> str:
+    """Return "Gen1" or "Gen2" for an Aria device calibration."""
+    version = device_calib.get_device_version()
+    name = getattr(version, "name", str(version).split(".")[-1])
+    if name not in _SLAM_LABEL_CANDIDATES:
+        raise RuntimeError(
+            f"Unsupported Aria device version {name!r}. "
+            f"Known versions: {sorted(_SLAM_LABEL_CANDIDATES)}"
+        )
+    return name
+
+
+def get_camera_labels(device_calib) -> dict:
+    """Resolve the camera labels actually present on this device.
+
+    Returns {"rgb": str | None, "slam": [str, ...]}. Candidates are intersected
+    with the device's real label list, so a recording profile that disabled a
+    camera yields a shorter list instead of a crash further downstream.
+    """
+    generation = get_device_generation(device_calib)
+    available = set(device_calib.get_camera_labels())
+
+    slam_labels = [
+        label for label in _SLAM_LABEL_CANDIDATES[generation] if label in available
+    ]
+    if not slam_labels:
+        raise RuntimeError(
+            f"No SLAM cameras found on this {generation} device. "
+            f"Expected any of {_SLAM_LABEL_CANDIDATES[generation]}, "
+            f"available labels are {sorted(available)}"
+        )
+
+    return {
+        "rgb": RGB_LABEL if RGB_LABEL in available else None,
+        "slam": slam_labels,
+    }
+
+
+def get_readout_time_ns(online_camera_calibs, camera_label: str) -> float:
+    """Rolling-shutter readout time for one camera, in nanoseconds.
+
+    Sourced from MPS online calibration rather than from a table keyed on image
+    height (which is what this repo used to do, and which hardcoded Gen 1's
+    2880 / 1408 / 480 resolutions).
+
+    Why MPS and not the device: Aria *factory* calibration does not carry
+    readout time at all. The factory_calibration JSON embedded in the VRS has
+    no such field, so CameraCalibration.get_readout_time_sec() returns None
+    there for every camera, on both generations. MPS *online* calibration does
+    populate it, via the "ReadoutTimesSec" field of online_calibration.jsonl.
+
+    Reading it from the data also makes this profile-agnostic. Gen 2 readout
+    times are undocumented and vary per recording profile -- profile8 reports
+    38 ms for RGB (the sensor reads out its full 4032x3024 mode and the ISP
+    downscales to 2560x1920), while profile10 uses a different, faster binned
+    mode. Whatever the recording actually used comes back in its own MPS
+    output, so no table needs maintaining.
+
+    Global-shutter cameras -- which is every Aria SLAM camera, on both
+    generations -- are absent from the MPS field and report None. That is
+    correct, not missing data: they have no rolling shutter to model. Returns
+    0.0 for them.
+
+    Semantics, per projectaria_tools CameraCalibration.h: the total frame
+    readout time "from reading the first pixel to last pixel", in seconds.
+    """
+    for online_calib in online_camera_calibs:
+        for camera_calib in online_calib.camera_calibs:
+            if camera_calib.get_label() != camera_label:
+                continue
+            readout_sec = camera_calib.get_readout_time_sec()
+            # None => global shutter. Constant across a recording, so the first
+            # record that mentions this camera is authoritative.
+            return 0.0 if readout_sec is None else float(readout_sec) * 1e9
+
+    raise RuntimeError(
+        f"Camera {camera_label!r} does not appear in the MPS online calibration. "
+        "Cannot determine its readout time."
+    )
+
+
 @dataclass
 class AriaFrame:
     fx: float
@@ -436,30 +558,57 @@ def get_rectified_vignette_image(
     output_focal: int,
     output_h: int,
     output_w: int = None,
+    generation: str = "Gen1",
 ):
     """
     The output image will be a rectified image at the same resolution of input streaming frames.
+
+    `generation` selects the vignette source: Gen 1 uses the bundled per-sensor
+    lens-shading assets, Gen 2 uses a neutral no-op (see below).
     """
-
-    if camera_label == "camera-rgb":
-        vignette_path = (
-            input_root / "vignette_imx577_16bit.png"
-        )
-    else:
-        vignette_path = input_root / "vignette_ov7251.png"
-
-    vignette_raw = np.array(Image.open(os.path.expanduser(vignette_path)))
-
-    vignette_raw = vignette_raw[:, :, :3]
 
     input_h = frame.h
     input_w = frame.w
 
-    if camera_label == "camera-rgb" and input_w != 2880:
-        # apply the correct downscaling operation. Crop the 2880x2880 image to 2816x2816 and then downsample (e.g. 1408x1408)
-        assert vignette_raw.shape[0] == 2880
-        vignette_raw = vignette_raw[32:-32, 32:-32]
-        vignette_raw = cv2.resize(vignette_raw, (input_w, input_h))
+    is_rgb = camera_label == RGB_LABEL
+
+    if generation == "Gen2":
+        # No Gen 2 devignetting assets exist. The masks shipped in data/ are
+        # Gen 1 lens-shading models for the IMX577 (RGB) and OV7251 (SLAM)
+        # sensors at Gen 1 resolutions (2880x2880 and 640x480); Gen 2 uses
+        # different sensors at different resolutions and aspect ratios, so
+        # applying them would bake a wrong correction into the splat.
+        # projectaria_tools ships no Gen 2 replacement either -- its
+        # load_devignetting_mask() API is generation-agnostic but the asset
+        # bundle covers Gen 1 resolutions only.
+        #
+        # Use a neutral (all-ones) vignette instead: correct shape everywhere
+        # downstream, no incorrect photometric correction. Gen 2 also performs
+        # lens-shading correction on-device in the ISP (the rgb_camera.lsc
+        # profile option), so a null correction here is arguably right rather
+        # than merely safe.
+        channels = 3 if is_rgb else 1
+        vignette_raw = np.full((input_h, input_w, channels), 255.0, dtype=float)
+    else:
+        if is_rgb:
+            vignette_path = (
+                input_root / "vignette_imx577_16bit.png"
+            )
+        else:
+            vignette_path = input_root / "vignette_ov7251.png"
+
+        vignette_raw = np.array(Image.open(os.path.expanduser(vignette_path)))
+
+        # Guard the channel slice: the shipped assets are RGB/RGBA, but a
+        # grayscale replacement would be 2-D and raise IndexError here.
+        if vignette_raw.ndim == 3:
+            vignette_raw = vignette_raw[:, :, :3]
+
+        if is_rgb and input_w != 2880:
+            # apply the correct downscaling operation. Crop the 2880x2880 image to 2816x2816 and then downsample (e.g. 1408x1408)
+            assert vignette_raw.shape[0] == 2880
+            vignette_raw = vignette_raw[32:-32, 32:-32]
+            vignette_raw = cv2.resize(vignette_raw, (input_w, input_h))
 
     if output_w is None:
         output_w = int(output_h / input_h * input_w)
@@ -483,6 +632,7 @@ def get_rectified_mask(
     output_focal: int,
     output_height: int = None,
     input_root: Path = None,
+    generation: str = "Gen1",
 ):
     """
     if input_root is not None, it will read the mask.png inside, otherwise it will a full frame mask for the original frame.
@@ -491,7 +641,12 @@ def get_rectified_mask(
     input_h = frame.h
     input_w = frame.w
 
-    if input_root is None:
+    if input_root is None or generation == "Gen2":
+        # Gen 2: mask_imx577.png is a 1408x1408 square circular-FOV mask for the
+        # Gen 1 RGB sensor. Stretching it onto Gen 2's 4:3 frame would put the
+        # valid-pixel boundary in the wrong place across the whole image, so use
+        # a full-frame mask instead. (undistort_image already zeroes pixels that
+        # fall outside the source fisheye, which is the boundary that matters.)
         mask_raw = np.ones((input_h, input_w)).astype(np.float32)
     else:
         mask_path = input_root / "mask_imx577.png"
