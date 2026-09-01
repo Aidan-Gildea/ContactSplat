@@ -8,3 +8,5 @@ __pycache__/
 *$py.class
 lightning_logs/*
 CONTEXT-POOL/
+# personal working notes, not repo documentation
+PR_CHAT_HISTORY.md
