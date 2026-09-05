@@ -112,7 +112,7 @@ python scripts/extract_aria_vrs.py \
 ```
 
 > **Quote your paths.** Aria Studio names recordings with spaces in them
-> (`Test recording_20260804_195027.vrs`), which breaks unquoted shell expansion.
+> (e.g. `My recording_20260101_120000.vrs`), which breaks unquoted shell expansion.
 
 ### Choosing the rectification parameters
 

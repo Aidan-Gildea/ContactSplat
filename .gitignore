@@ -7,4 +7,4 @@ __pycache__/
 *.py[cod]
 *$py.class
 lightning_logs/*
-CONTEXT-POOL
+fixes.md

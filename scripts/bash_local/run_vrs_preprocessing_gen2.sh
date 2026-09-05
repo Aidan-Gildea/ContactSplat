@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-# NOTE: these paths contain spaces, so every expansion below is quoted.
+# Aria Studio often puts spaces in recording names, so every expansion below is quoted.
 DATA_INPUT_DIR="/path/to/recordings"
 DATA_PROCESSED_DIR="/path/to/processed"
 VRS_FILE="my_recording.vrs"
