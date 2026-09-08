@@ -26,7 +26,7 @@ case it is a no-op), and aborts on anything else rather than guess.
 
 Run with any Python that has `pxr` (usd-core), e.g. the 3dgrut env:
 
-    /home/sun/miniforge3/envs/3dgrut/bin/python \
+    python \
         scripts/fix_nurec_usdz_frame.py <asset.usdz>          # fix in place
         scripts/fix_nurec_usdz_frame.py in.usdz -o out.usdz   # write elsewhere
 

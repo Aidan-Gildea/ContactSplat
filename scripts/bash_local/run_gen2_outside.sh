@@ -1,26 +1,45 @@
 #!/bin/bash
-# Preprocess the Aria Gen 2 "Outside_20260812_141244" recording.
+# Preprocess an Aria Gen 2 recording made with profile10 (RGB 2016x1512 @ 30 Hz).
 #
-# Concrete, runnable version of run_vrs_preprocessing_gen2.sh with this
-# machine's real paths and rectification parameters matched to the recording's
-# actual sensor mode (profile10, RGB 2016x1512 @ 30 Hz).
+# Concrete, runnable version of run_vrs_preprocessing_gen2.sh with rectification
+# parameters matched to profile10. Paths come from the environment, set exactly
+# as in README section 1.2:
 #
-# Run from the repo root, in the ego_splats env:
+#   export REC_ROOT="/path/to/recordings"   # folder holding <SCENE>.vrs and the MPS output
+#   export SCENE="my_recording"             # .vrs filename WITHOUT the extension
 #   conda activate ego_splats && bash scripts/bash_local/run_gen2_outside.sh
+#
+# Optional overrides (defaults match the README):
+#   MPS_FOLDER   default $REC_ROOT/mps_${SCENE}_vrs/slam
+#   OUT_ROOT     default $REC_ROOT/processed
+#   RGB_FOCAL / RGB_HEIGHT / SLAM_FOCAL / SLAM_HEIGHT   see below
 
 set -euo pipefail
 
-REC_ROOT="/home/sun/aria"
-SCENE="Outside_20260812_141244"
-MPS_FOLDER="$REC_ROOT/mps_${SCENE}_vrs/slam"
-OUT_ROOT="$REC_ROOT/processed"
+REC_ROOT="${REC_ROOT:?set REC_ROOT to the folder containing \$SCENE.vrs (README 1.2)}"
+SCENE="${SCENE:?set SCENE to the .vrs filename without the extension (README 1.2)}"
+MPS_FOLDER="${MPS_FOLDER:-$REC_ROOT/mps_${SCENE}_vrs/slam}"
+OUT_ROOT="${OUT_ROOT:-$REC_ROOT/processed}"
+
+# Run from the repo root regardless of where the script was invoked from.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+if [ ! -f "$REC_ROOT/$SCENE.vrs" ]; then
+    echo "No recording at: $REC_ROOT/$SCENE.vrs" >&2
+    exit 1
+fi
+if [ ! -f "$MPS_FOLDER/closed_loop_trajectory.csv" ]; then
+    echo "No MPS output at: $MPS_FOLDER (expected closed_loop_trajectory.csv)" >&2
+    exit 1
+fi
 
 mkdir -p "$OUT_ROOT"
 
 # --- Rectification parameters ------------------------------------------------
 #
-# This recording's RGB is 2016x1512 (profile10), NOT the 2560x1920 of profile8
-# that run_vrs_preprocessing_gen2.sh was tuned for. Its defaults (focal 1280 /
+# profile10 RGB is 2016x1512, NOT the 2560x1920 of profile8 that
+# run_vrs_preprocessing_gen2.sh defaults to. Those defaults (focal 1280 /
 # height 1920) would resample every frame UP to 2560x1920 -- 4.19 MB per PNG
 # instead of 2.94 MB, for no extra information.
 #
@@ -32,10 +51,11 @@ mkdir -p "$OUT_ROOT"
 # sensor's native sampling.
 #
 # SLAM is 512x512 with a 119 degree FOV; focal 180 at width 512 keeps ~110.
-RGB_FOCAL=1008
-RGB_HEIGHT=1512
-SLAM_FOCAL=180
-SLAM_HEIGHT=512
+# For any other sensor mode see docs/rectification.md and debug_scripts/solve_focal.py.
+RGB_FOCAL="${RGB_FOCAL:-1008}"
+RGB_HEIGHT="${RGB_HEIGHT:-1512}"
+SLAM_FOCAL="${SLAM_FOCAL:-180}"
+SLAM_HEIGHT="${SLAM_HEIGHT:-512}"
 
 python scripts/extract_aria_vrs.py \
     --input_root  "$REC_ROOT" \

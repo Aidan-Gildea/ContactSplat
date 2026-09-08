@@ -12,22 +12,36 @@
 # file for the Gen 1 settings. The Python side auto-detects the generation and
 # resolves camera labels from the device, so the only differences here are the
 # rectification parameters and the paths.
+#
+# Paths come from the environment, set as in README section 1.2:
+#
+#   export REC_ROOT="/path/to/recordings"   # folder holding <SCENE>.vrs and the MPS output
+#   export SCENE="my_recording"             # .vrs filename WITHOUT the extension
+#
+# Optional: MPS_FOLDER (default $REC_ROOT/mps_${SCENE}_vrs/slam), OUT_ROOT
+# (default $REC_ROOT/processed), RGB_FOCAL / RGB_HEIGHT (default to the
+# profile8 pair below; profile10 recordings want 1008 / 1512, see
+# run_gen2_outside.sh).
 
 set -euo pipefail
 
-# NOTE: these paths contain spaces, so every expansion below is quoted.
-DATA_INPUT_DIR="/Users/patrick/aria"
-DATA_PROCESSED_DIR="/Users/patrick/aria/processed"
-VRS_FILE="Test recording_20260804_195027.vrs"
+# NOTE: Aria Studio puts spaces in recording names, so every expansion below is quoted.
+DATA_INPUT_DIR="${REC_ROOT:?set REC_ROOT to the folder containing \$SCENE.vrs (README 1.2)}"
+SCENE="${SCENE:?set SCENE to the .vrs filename without the extension (README 1.2)}"
+VRS_FILE="$SCENE.vrs"
+DATA_PROCESSED_DIR="${OUT_ROOT:-$DATA_INPUT_DIR/processed}"
 
 # MPS folder
-MPS_FOLDER="$DATA_INPUT_DIR/mps_Test recording_20260804_195027_vrs/slam"
+MPS_FOLDER="${MPS_FOLDER:-$DATA_INPUT_DIR/mps_${SCENE}_vrs/slam}"
 # Ensures the MPS folder contains the following structure
 # $MPS_FOLDER
 # - closed_loop_trajectory.csv
 # - semidense_points.csv.gz
 # - semidense_observations.csv.gz
 # - online_calibration.jsonl      <- Gen 2 also sources readout time from here
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
 
 mkdir -p "$DATA_PROCESSED_DIR"
 
@@ -46,12 +60,15 @@ mkdir -p "$DATA_PROCESSED_DIR"
 #
 # Gen 2 SLAM is 512x512 with a 119 degree FOV. focal 180 at width 512 gives
 # ~110 degrees, which is the same trade the Gen 1 defaults made.
+RGB_FOCAL="${RGB_FOCAL:-1280}"
+RGB_HEIGHT="${RGB_HEIGHT:-1920}"
+
 python scripts/extract_aria_vrs.py \
     --input_root "$DATA_INPUT_DIR" \
     --output_root "$DATA_PROCESSED_DIR" \
     --vrs_file "$VRS_FILE" \
-    --rectified_rgb_focal 1280 \
-    --rectified_rgb_size 1920 \
+    --rectified_rgb_focal "$RGB_FOCAL" \
+    --rectified_rgb_size "$RGB_HEIGHT" \
     --rectified_monochrome_focal 180 --rectified_monochrome_height 512 \
     --online_calib_file "$MPS_FOLDER/online_calibration.jsonl" \
     --trajectory_file "$MPS_FOLDER/closed_loop_trajectory.csv" \

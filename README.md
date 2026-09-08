@@ -141,10 +141,13 @@ python scripts/extract_aria_vrs.py \
     2>&1 | tee "$OUT_ROOT/preprocess_$SCENE.log"
 ```
 
-Or edit the paths at the top of
-[`scripts/bash_local/run_vrs_preprocessing_gen2.sh`](scripts/bash_local/run_vrs_preprocessing_gen2.sh)
-and run that instead. Be aware that it ships the profile8 pair, `1280` and `1920`, which
-would resample a profile10 recording upward for no benefit.
+Or, with the variables from 1.2 exported, run
+[`scripts/bash_local/run_gen2_outside.sh`](scripts/bash_local/run_gen2_outside.sh) instead.
+It runs the same command and defaults to the profile10 pair above. The sibling
+[`run_vrs_preprocessing_gen2.sh`](scripts/bash_local/run_vrs_preprocessing_gen2.sh) is
+identical except that it defaults to the profile8 pair, `1280` and `1920`, which would
+resample a profile10 recording upward for no benefit. Both scripts honour `RGB_FOCAL`
+and `RGB_HEIGHT` if they are set, and neither contains machine-specific paths.
 
 Both focal flags default to `-1`, which means skip that camera. Omit them and the run
 finishes in seconds having produced nothing.
@@ -231,6 +234,10 @@ python train_lightning.py \
     viewer.use_trainer_viewer=true
 ```
 
+[`scripts/bash_local/train_gen2_outside.sh`](scripts/bash_local/train_gen2_outside.sh) runs
+the same command from the variables above, with the MCMC cap and half-resolution settings
+needed to fit a long outdoor recording on a 16 GB GPU. Its header lists the overrides.
+
 Viewer at `http://0.0.0.0:8080` during training. Set `viewer.use_trainer_viewer=false` for
 a production run. The PLY lands in
 `output/<exp_name>/point_cloud/iteration_30000/point_cloud.ply`.
@@ -252,11 +259,18 @@ SLAM cameras still matter in Block 1, though, where they are used to generate th
 # interactive viewer on a trained model
 python launch_viewer.py model_root="output/$SCENE/$RECT/"
 
-# render a video
+# render a video (reads SCENE and RECT, or set RESULTS_FOLDER to the model directory)
 bash scripts/bash_local/run_aria_render.sh
+
+# export a NuRec USDZ for Isaac Sim (needs a 3dgrut checkout and its conda env)
+export GRUT_REPO="$HOME/3dgrut"       # default; override if it lives elsewhere
+bash scripts/bash_local/export_gen2_outside_usdz.sh
 ```
 
-The PLY is the handoff point to `3dgrut` for NuRec and Isaac Sim.
+The PLY is the handoff point to `3dgrut` for NuRec and Isaac Sim. The export script
+filters far-field outliers, runs 3dgrut's `ply_to_usd.py`, and strips the rotation it
+bakes in so the asset stays in the MPS world frame. Its header lists the variables it
+reads.
 
 ---
 
