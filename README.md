@@ -46,38 +46,32 @@ variables set with `export`.
 
 ```mermaid
 flowchart LR
-    rec(["REC_ROOT"]) --> S1
-    scn1(["SCENE"]) --> S1
-    vrs[/"$SCENE.vrs"/] --> S1
-    mps[/"mps_${SCENE}_vrs/slam/"/] --> S1
+    vrs[/"Aria recording (.vrs)"/] --> S1
+    mps[/"MPS SLAM output"/] --> S1
 
     subgraph S1["run_gen2_outside.sh"]
         p1["extract_aria_vrs.py"]
     end
 
-    S1 --> data[/"$SCENE/camera-rgb-rectified-1008-h1512/"/]
+    S1 --> data[/"Posed, rectified images"/]
 
-    rec2(["REC_ROOT"]) --> S2
-    scn2(["SCENE"]) --> S2
     data --> S2
 
     subgraph S2["train_gen2_outside.sh"]
         p2["train_lightning.py"]
     end
 
-    S2 --> ply[/"point_cloud.ply"/]
+    S2 --> ply[/"Gaussian splat (.ply)"/]
 
     data --> S3
-    dec(["DECIMATE=1"]) -.-> S3
 
     subgraph S3["run_photogrammetry.sh"]
         direction TB
         p3a["colmap_from_transforms.py"] --> p3b["colmap"] --> p3c["evaluate_mesh.py"] --> p3d["decimate_mesh.py"]
     end
 
-    S3 --> mesh[/"mesh_delaunay_decimated.ply"/]
+    S3 --> mesh[/"Collision mesh (.ply)"/]
 
-    scn4(["SCENE"]) --> S4
     ply --> S4
     mesh --> S4
 
@@ -86,7 +80,7 @@ flowchart LR
         p4a["filter_splat_outliers.py"] --> p4b["ply_to_usd.py"] --> p4c["fix_nurec_usdz_frame.py"] --> p4d["add_mesh_collider.py"]
     end
 
-    S4 --> usdz[/"${SCENE}_with_collider.usdz"/] --> sim[["Isaac Sim"]]
+    S4 --> usdz[/"Isaac Sim scene (.usdz)"/] --> sim[["Isaac Sim"]]
 ```
 
 | Stage | Script | Input | Output |
