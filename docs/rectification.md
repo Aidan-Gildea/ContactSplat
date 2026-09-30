@@ -1,8 +1,8 @@
 # Choosing the rectification values
 
-Preprocessing resynthesises every fisheye frame as if an ideal pinhole camera had taken
-it. Two flags control that synthetic camera, and both depend on the resolution your
-recording actually used:
+Preprocessing rectifies every fisheye frame as if an ideal pinhole camera took the image.
+Two flags define that pinhole camera, and the right values depend on your recording's
+resolution:
 
 ```
 --rectified_rgb_focal    the focal length of the synthetic camera, in pixels

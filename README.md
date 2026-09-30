@@ -1,34 +1,48 @@
 # ContactSplat
 
-**Walk around a place once wearing Project Aria Gen 2 glasses, and get back a
-photorealistic simulation environment that robots can actually touch.**
-
-This repo turns a single Aria Gen 2 recording into one `.usdz` file for NVIDIA Isaac Sim
-that contains two things stacked exactly on top of each other:
-
-- a **Gaussian splat** you *see*: photoreal, rendered by Isaac Sim's RTX renderer
-- a **photogrammetry mesh** you *hit*: invisible, but it's the collider, so robots can
-  drive on the floor and bump into walls
-
-They line up with no manual alignment. Both are built in the same metric, gravity-aligned
-coordinate frame from Aria's Machine Perception Services (MPS), so you can drop the
-file into a stage and press Play.
-
 <!-- media: hero GIF, e.g. a robot driving through the Outside scene in Isaac Sim
-![ContactSplat in Isaac Sim](media/isaacsim_drive.gif)
+<p align="center">
+  <img width="100%" src="media/isaacsim_drive.gif">
+</p>
 -->
 
-It's built on top of Meta's
-[egocentric_splats](https://github.com/facebookresearch/egocentric_splats) (see
-[Credits](#credits)), with Aria Gen 2 support added and a mesh + Isaac Sim stage bolted
-on the end.
+This repository provides a pipeline that generates contact-rich, photorealistic simulation
+environments for NVIDIA Isaac Sim from a single trajectory recorded with Project Aria Gen 2
+glasses. Each environment is a single USDZ file containing two co-registered assets: a 3D
+Gaussian splat that provides the visual appearance, and a multi-view stereo mesh that is
+invisible to the renderer and acts as a static collider for physics. Both assets are
+reconstructed in the metric, gravity-aligned world frame produced by Aria Machine
+Perception Services (MPS), so they are aligned by construction and no registration step is
+required.
 
----
+This repository is a fork of Meta's
+[egocentric_splats](https://github.com/facebookresearch/egocentric_splats). The
+preprocessing, training, rendering and viewer code are inherited from that project and
+extended to support Aria Gen 2 recordings. The mesh reconstruction and Isaac Sim export
+stages are new.
 
-## The pipeline at a glance
+## Contents
 
-Four shell scripts, run in order. Each one takes the previous one's output. The rounded
-boxes are the variables you `export` in your terminal.
+- [Contents](#contents)
+- [1. Pipeline Overview](#1-pipeline-overview)
+- [2. Dependencies and Installation](#2-dependencies-and-installation)
+- [3. Sample Recordings](#3-sample-recordings)
+- [4. Running the Pipeline](#4-running-the-pipeline)
+  - [4.1 Preprocessing](#41-preprocessing)
+  - [4.2 Training the Gaussian splat](#42-training-the-gaussian-splat)
+  - [4.3 Reconstructing the collision mesh](#43-reconstructing-the-collision-mesh)
+  - [4.4 Exporting to Isaac Sim](#44-exporting-to-isaac-sim)
+  - [4.5 Visualization](#45-visualization)
+- [5. Recording New Scenes](#5-recording-new-scenes)
+- [6. Repository Structure](#6-repository-structure)
+- [7. Citations](#7-citations)
+- [8. License and Acknowledgements](#8-license-and-acknowledgements)
+
+## 1. Pipeline Overview
+
+The pipeline consists of four shell scripts. Each script reads the output of the previous
+stage, and stages 4.2 and 4.3 are independent of each other. Rounded nodes are environment
+variables set with `export`.
 
 ```mermaid
 flowchart LR
@@ -75,61 +89,64 @@ flowchart LR
     S4 --> usdz[/"${SCENE}_with_collider.usdz"/] --> sim[["Isaac Sim"]]
 ```
 
-### What each step actually does
+| Stage | Script | Input | Output |
+|---|---|---|---|
+| Preprocessing | `scripts/bash_local/run_gen2_outside.sh` | VRS recording, MPS SLAM output | rectified images, `transforms.json`, sparse depth |
+| Splat training | `scripts/bash_local/train_gen2_outside.sh` | preprocessed dataset | `point_cloud.ply` |
+| Mesh reconstruction | `photogrammetry/run_photogrammetry.sh` | preprocessed dataset | `mesh_delaunay.ply`, `mesh_delaunay_decimated.ply` |
+| Isaac Sim export | `isaacsim/export_isaacsim_usdz.sh` | splat PLY, mesh PLY | `<SCENE>_with_collider.usdz` |
 
-**1. Preprocess:** [`scripts/bash_local/run_gen2_outside.sh`](scripts/bash_local/run_gen2_outside.sh)
-Takes the raw recording (`.vrs`) plus the MPS output (camera trajectory, calibration,
-and a sparse 3D point cloud) and turns it into a plain, easy-to-use dataset: undistorted
-pinhole images, a camera pose for every frame (`transforms.json`), and sparse depth. The
-Aria fisheye gets "rectified" to a normal 90° pinhole camera here, which is what the rest
-of the pipeline expects.
-→ `$REC_ROOT/processed/$SCENE/camera-rgb-rectified-1008-h1512/`
+## 2. Dependencies and Installation
 
-**2. Train the splat:** [`scripts/bash_local/train_gen2_outside.sh`](scripts/bash_local/train_gen2_outside.sh)
-Fits a 3D Gaussian splat to those images, using the MPS poses as-is (no COLMAP-style
-pose estimation) and the MPS points as the starting point cloud. It also models the RGB
-camera's rolling shutter, which matters because you're walking while recording. The
-defaults fit on a 16 GB GPU. On a 24 GB+ card you can go sharper (see the comments in
-the script).
-→ `output/$SCENE/camera-rgb-rectified-1008-h1512/point_cloud/iteration_30000/point_cloud.ply`
+- Linux with an NVIDIA GPU and CUDA. Splat training (gsplat) and dense stereo (COLMAP)
+  have no CPU backend.
+- The default training configuration fits in 16 GB of GPU memory.
+- Isaac Sim 5.1 to load the exported scene.
 
-**3. Build the collision mesh:** [`photogrammetry/run_photogrammetry.sh`](photogrammetry/run_photogrammetry.sh)
-Runs COLMAP multi-view stereo on the same images, but **keeps the MPS poses fixed**
-instead of letting COLMAP solve its own. That's the trick that puts the mesh in the same
-frame and scale as the splat. It picks keyframes, triangulates, runs dense stereo, fuses,
-meshes, and then scores the mesh against the MPS geometry (`report.md`). With
-`DECIMATE=1` it also writes a lighter copy of the mesh, which is what you want for physics.
-Steps 2 and 3 don't depend on each other, so run them in either order.
-→ `output/photogrammetry/$SCENE/camera-rgb-rectified-1008-h1512/mesh_delaunay_decimated.ply`
-(or `mesh_delaunay.ply` without `DECIMATE=1`)
+The pipeline uses two conda environments: `ego_splats` for stages 4.1 through 4.3 and for
+the first step of 4.4, and `3dgrut` for the remaining steps of 4.4.
 
-**4. Package for Isaac Sim:** [`isaacsim/export_isaacsim_usdz.sh`](isaacsim/export_isaacsim_usdz.sh)
-Cleans up stray far-away Gaussians, converts the splat to NVIDIA's NuRec format with
-[3dgrut](https://github.com/nv-tlabs/3dgrut), undoes a rotation 3dgrut bakes in, and then
-adds the mesh as a hidden static collider, all in one file. It automatically uses the
-decimated mesh if it exists.
-→ `output/$SCENE/camera-rgb-rectified-1008-h1512/isaacsim/${SCENE}_with_collider.usdz`
+```bash
+git clone --branch pipeline https://github.com/Aidan-Gildea/ContactSplat.git
+cd ContactSplat
 
-<!-- media: side-by-side of the splat and the mesh for the same scene
-![Splat vs. collision mesh](media/splat_vs_mesh.gif)
--->
+conda create -n ego_splats python=3.10 -y
+conda activate ego_splats
 
----
+# Install torch first, from the CUDA index that matches your driver (see nvidia-smi)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
+pip install projectaria-mps open3d
 
-## Try it with our sample recordings
+# Should print the torch version and True
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
 
-Don't have Aria glasses? No problem. We put the recordings used in this project, each
-with its `.vrs` and the MPS output, in a public Google Drive folder:
+> [!NOTE]
+> If the check prints `False`, the installed torch build does not match the system CUDA
+> version. Reinstall torch from the matching index.
 
-**📁 [ContactSplat Sample Trajectories](https://drive.google.com/drive/folders/1INGZFiCD6qYtHSzbXo4Qegmj-flwikv0)**:
-Room, Outside and Hall.
+Stage 4.3 requires a CUDA-enabled build of [COLMAP](https://colmap.github.io/install.html)
+on `PATH`.
 
-Download one and lay it out like this (the scripts look for exactly these names):
+Stage 4.4 requires a checkout of [3dgrut](https://github.com/nv-tlabs/3dgrut) at `~/3dgrut`
+with its conda environment named `3dgrut`, installed following the 3dgrut README. A
+different checkout location can be set with `export GRUT_REPO=/path/to/3dgrut`.
+
+## 3. Sample Recordings
+
+The recordings used in this project are available in the
+[ContactSplat Sample Trajectories](https://drive.google.com/drive/folders/1INGZFiCD6qYtHSzbXo4Qegmj-flwikv0)
+Google Drive folder. Each sample (Room, Outside, Hall) contains the Aria Gen 2 VRS file
+and its MPS SLAM output.
+
+The scripts expect the following layout, where the directory is `REC_ROOT` and the VRS
+filename without its extension is `SCENE`:
 
 ```
-my_recordings/                                   ← this is your REC_ROOT
-├── Outside_20260812_141244.vrs                  ← SCENE is the filename without .vrs
-└── mps_Outside_20260812_141244_vrs/
+<REC_ROOT>/
+├── <SCENE>.vrs
+└── mps_<SCENE>_vrs/
     └── slam/
         ├── closed_loop_trajectory.csv
         ├── online_calibration.jsonl
@@ -137,146 +154,169 @@ my_recordings/                                   ← this is your REC_ROOT
         └── semidense_observations.csv.gz
 ```
 
-If your MPS folder lives somewhere else, `export MPS_FOLDER=/path/to/slam` and step 1
-will use that instead.
+If the MPS output is stored elsewhere, set `MPS_FOLDER` to the `slam` directory.
 
----
+## 4. Running the Pipeline
 
-## Setup
-
-You'll need Linux and an NVIDIA GPU (training and dense stereo both need CUDA).
-
-**1. The main environment.** Used for steps 1–3 and part of step 4.
-
-```bash
-conda create -n ego_splats python=3.10 -y
-conda activate ego_splats
-
-# Install torch FIRST, from the CUDA index that matches your driver (check `nvidia-smi`)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
-pip install projectaria-mps open3d
-
-# Sanity check: this should print your torch version and True
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
-
-If that prints `False`, torch can't see your GPU. That almost always means the torch
-build doesn't match your CUDA version, so reinstall it from the right index.
-
-**2. COLMAP** (step 3), built with CUDA and on your `PATH`. See the
-[COLMAP install guide](https://colmap.github.io/install.html).
-
-**3. 3dgrut** (step 4). Clone [3dgrut](https://github.com/nv-tlabs/3dgrut) to
-`~/3dgrut` and follow its instructions to make a conda env called `3dgrut`. (Somewhere
-else? `export GRUT_REPO=/your/path`.)
-
-**4. Isaac Sim** to open the result. We tested with Isaac Sim 5.1.
-
----
-
-## Run it
-
-Open a terminal in the repo root and set your paths. You need to do this once per
-terminal session:
+All commands are run from the repository root. Set the following variables once per shell:
 
 ```bash
 conda activate ego_splats
-export REC_ROOT="/path/to/my_recordings"
-export SCENE="Outside_20260812_141244"
+export REC_ROOT=/path/to/recordings
+export SCENE=Outside_20260812_141244
 ```
 
-Then run the four steps:
+The default rectification parameters (focal length 1008 px, height 1512 px) assume a
+recording made with Aria recording profile `profile10`. For other profiles, see
+[docs/rectification.md](docs/rectification.md).
+
+### 4.1 Preprocessing
 
 ```bash
-# 1. preprocess  (CPU-heavy, takes a while)
 bash scripts/bash_local/run_gen2_outside.sh
+```
 
-# 2. train the splat  (GPU, the long one)
+Reads the VRS file together with the MPS closed-loop trajectory, online calibration and
+semi-dense point cloud. The RGB stream is rectified from the Aria fisheye model to a
+pinhole camera with a 90 degree horizontal field of view, and a pose is assigned to each
+frame from the MPS trajectory at the frame's exposure timestamp. Output is written to
+`$REC_ROOT/processed/$SCENE/camera-rgb-rectified-1008-h1512/`.
+
+The output can be checked before training with:
+
+```bash
+python debug_scripts/verify_preprocessing.py "$REC_ROOT/processed/$SCENE/camera-rgb-rectified-1008-h1512"
+```
+
+### 4.2 Training the Gaussian splat
+
+```bash
 bash scripts/bash_local/train_gen2_outside.sh
+```
 
-# 3. build the collision mesh  (GPU)
+Trains a 3DGS model with gsplat for 30k iterations. Camera poses are taken from MPS and
+are not optimized, the MPS semi-dense points initialize the Gaussians, and rolling shutter
+is modelled during rendering. Densification uses the MCMC strategy with a capped Gaussian
+count. The trained model is written to
+`output/$SCENE/camera-rgb-rectified-1008-h1512/point_cloud/iteration_30000/point_cloud.ply`.
+
+> [!NOTE]
+> The defaults train at half resolution with a cap of 1.5M Gaussians to fit in 16 GB of
+> GPU memory. On GPUs with 24 GB or more, see the comments in the script for higher
+> quality settings.
+
+### 4.3 Reconstructing the collision mesh
+
+```bash
 DECIMATE=1 bash photogrammetry/run_photogrammetry.sh \
     "$REC_ROOT/processed/$SCENE/camera-rgb-rectified-1008-h1512"
+```
 
-# 4. package for Isaac Sim
+Reconstructs a mesh with COLMAP multi-view stereo while holding the MPS camera poses and
+intrinsics fixed. COLMAP's `mapper` is never run: keyframes are selected from the
+trajectory, SIFT features are matched sequentially, and points are triangulated against
+the fixed poses before patch-match stereo, fusion and Delaunay meshing. The mesh is
+therefore in the same frame and scale as the splat. Each mesh is scored against the MPS
+geometry in `report.md`.
+
+With `DECIMATE=1`, the script also writes `mesh_delaunay_decimated.ply`, a simplified
+copy with long spurious edges removed and the triangle count reduced, which is better
+suited for collision checking. Output is written to
+`output/photogrammetry/$SCENE/camera-rgb-rectified-1008-h1512/`.
+
+Completed stages are skipped on re-run. `FORCE=1` reruns every stage, and
+`STOP_AFTER=triangulate` stops after the sparse model so the alignment can be inspected
+before dense stereo. See [photogrammetry/README.md](photogrammetry/README.md) for the full
+list of options.
+
+### 4.4 Exporting to Isaac Sim
+
+```bash
 bash isaacsim/export_isaacsim_usdz.sh
 ```
 
-Open the `.usdz` in Isaac Sim with **File → Open** (or drag it onto a stage), then press
-**Play** to turn collisions on.
+Packages the splat and the mesh into one USDZ file in four steps:
 
-<!-- media: short screen recording of opening the file and pressing Play
-![Opening the USDZ in Isaac Sim](media/isaacsim_open.gif)
+1. `scripts/filter_splat_outliers.py` removes Gaussians more than 50 m from the median
+   Gaussian position, which would otherwise inflate the scene's bounding box.
+2. 3dgrut's `ply_to_usd.py` converts the splat PLY to the NuRec USDZ format rendered by
+   Isaac Sim.
+3. `scripts/fix_nurec_usdz_frame.py` removes the rotation that the 3dgrut exporter applies,
+   restoring the MPS Z-up frame.
+4. `isaacsim/add_mesh_collider.py` adds the mesh as an invisible static collider.
+
+The decimated mesh is used if it exists, otherwise the full mesh. Output is written to
+`output/$SCENE/camera-rgb-rectified-1008-h1512/isaacsim/${SCENE}_with_collider.usdz`.
+Open the file in Isaac Sim with File > Open and press Play to enable collisions.
+
+<!-- media: opening the USDZ in Isaac Sim and pressing Play
+<img src="media/isaacsim_open.gif" height="400"/>
 -->
 
-A few handy things:
+### 4.5 Visualization
 
-- **Check the preprocessing** before you spend hours training:
-  `python debug_scripts/verify_preprocessing.py "$REC_ROOT/processed/$SCENE/camera-rgb-rectified-1008-h1512"`
-- **Look at the splat** without Isaac Sim:
-  `python launch_viewer.py model_root="output/$SCENE"` opens a web viewer on port 8080.
-  Or render a flythrough video with
-  `RECT=camera-rgb-rectified-1008-h1512 bash scripts/bash_local/run_aria_render.sh`.
-- **The mesh step resumes where it left off** if it's interrupted. `FORCE=1` redoes
-  everything, and `STOP_AFTER=triangulate` lets you sanity-check the sparse alignment
-  before committing GPU hours. [`photogrammetry/README.md`](photogrammetry/README.md) has
-  the details.
+To view trained splats in the web viewer (port 8080):
 
-<!-- media: the training-time web viewer
-![Web viewer](media/viewer.gif)
+```bash
+python launch_viewer.py model_root="output/$SCENE"
+```
+
+To render a video along the recorded trajectory:
+
+```bash
+RECT=camera-rgb-rectified-1008-h1512 bash scripts/bash_local/run_aria_render.sh
+```
+
+<!-- media: side-by-side of the splat and the collision mesh
+<img src="media/splat_vs_mesh.gif" height="400"/>
 -->
 
----
+## 5. Recording New Scenes
 
-## Recording your own
+Record with Aria Gen 2 recording profile `profile10` (RGB 2016x1512 at 30 Hz). All defaults
+in this repository assume this profile. A higher frame rate provides more viewpoints, which
+matters more for reconstruction quality than per-frame resolution.
 
-1. **Record with `profile10`** on your Aria Gen 2 glasses. It's 30 fps RGB, and more
-   frames means more viewpoints, which means a better splat. Every default in this repo
-   is set up for it. (Other profiles work too, but you'll need different rectification
-   numbers. See [docs/rectification.md](docs/rectification.md).)
-2. **Walk, don't spin.** Standing still and turning your head gives the reconstruction
-   almost nothing to work with. Move through the space.
-3. **Take 2–5 minutes**, cover the space from a few heights and angles, and **come back
-   past places you've already been**. That helps MPS close loops.
-4. **Keep it sharp.** Move smoothly, and avoid very dim spaces, where motion blur creeps in.
-5. **Run MPS** on the recording, either in Aria Studio or from the command line:
-   ```bash
-   aria_mps single -i "$REC_ROOT/$SCENE.vrs" --features SLAM
-   ```
-6. Continue from [Run it](#run-it).
+Reconstruction quality depends mostly on the capture:
 
-More Gen 2 specifics are in [docs/gen2.md](docs/gen2.md).
+- Translate through the scene. Rotating in place provides no baseline for depth.
+- Record for 2 to 5 minutes and cover the scene from several heights and viewing angles.
+- Revisit earlier viewpoints so that MPS can close loops.
+- Avoid fast motion and low light, which cause motion blur.
 
----
+Then run MPS SLAM on the recording, either in Aria Studio or from the command line:
 
-## What's in the repo
+```bash
+aria_mps single -i "$REC_ROOT/$SCENE.vrs" --features SLAM
+```
 
-| Where | What it's for |
+See [docs/gen2.md](docs/gen2.md) for further notes on Aria Gen 2.
+
+## 6. Repository Structure
+
+| Path | Contents |
 |---|---|
-| `scripts/bash_local/` | the step 1 and step 2 scripts, plus a render script |
-| `scripts/extract_aria_vrs.py`, `scripts/aria_utils.py` | the preprocessing itself |
-| `train_lightning.py`, `render_lightning.py`, `launch_viewer.py` | train, render, and view splats |
-| `model/` | the Gaussian splat model and its losses |
-| `scene/` | loads the preprocessed dataset into cameras the trainer understands |
-| `utils/`, `viewer/`, `conf/` | helpers, the web viewer, and training configs |
-| `photogrammetry/` | step 3: the fixed-pose COLMAP mesh |
-| `isaacsim/` | step 4: the Isaac Sim export |
-| `debug_scripts/` | sanity checks for your environment, recording and dataset |
-| `docs/` | deeper notes on Gen 2 and rectification |
+| `scripts/extract_aria_vrs.py`, `scripts/aria_utils.py` | VRS and MPS preprocessing |
+| `scripts/bash_local/` | preprocessing, training and rendering scripts |
+| `train_lightning.py`, `render_lightning.py`, `launch_viewer.py` | training, rendering and viewer entry points |
+| `model/` | 3DGS and 2DGS models and losses |
+| `scene/` | dataset loading and Aria camera models |
+| `utils/`, `viewer/`, `conf/` | utilities, web viewer and training configurations |
+| `photogrammetry/` | fixed-pose COLMAP mesh reconstruction |
+| `isaacsim/` | Isaac Sim export |
+| `debug_scripts/` | environment, recording and dataset checks |
+| `docs/` | notes on Aria Gen 2 support and rectification |
 
-The repo also still handles **Aria Gen 1** recordings. Gen 2 has been tested end to end.
-Gen 1 has been tested through preprocessing and should work the rest of the way.
+Aria Gen 1 recordings are also supported. The full pipeline has been tested on Gen 2. Gen 1
+has been tested through preprocessing.
 
----
+## 7. Citations
 
-## Credits
+<!-- TODO: add the ContactSplat BibTeX here once the preprint has an arXiv ID -->
 
-This builds on [**egocentric_splats**](https://github.com/facebookresearch/egocentric_splats)
-by Meta Reality Labs Research. The preprocessing, training and viewer code come from there.
-If you use this repo, please cite their paper too:
+This work builds on egocentric_splats:
 
-```bibtex
+```
 @inproceedings{lv2025egosplats,
     title={Photoreal Scene Reconstruction from an Egocentric Device},
     author={Lv, Zhaoyang and Monge, Maurizio and Chen, Ka and Zhu, Yufeng and Goesele, Michael and Engel, Jakob and Dong, Zhao and Newcombe, Richard},
@@ -285,12 +325,13 @@ If you use this repo, please cite their paper too:
 }
 ```
 
-<!-- TODO: add the ContactSplat preprint BibTeX here once it has an arXiv ID -->
+## 8. License and Acknowledgements
 
-Mesh reconstruction uses [COLMAP](https://colmap.github.io/), and the Isaac Sim export
-uses [3dgrut](https://github.com/nv-tlabs/3dgrut).
+This repository is released under the [CC BY-NC 4.0](LICENSE) license, inherited from
+egocentric_splats.
 
-## License
-
-Released under [CC BY-NC 4.0](LICENSE), inherited from egocentric_splats. You're free
-to use and adapt it for **non-commercial** purposes with attribution.
+We thank the authors of [egocentric_splats](https://github.com/facebookresearch/egocentric_splats),
+on which this repository is based. Mesh reconstruction uses
+[COLMAP](https://colmap.github.io/), splat training uses
+[gsplat](https://github.com/nerfstudio-project/gsplat), and the Isaac Sim export uses the
+USDZ exporter from [3dgrut](https://github.com/nv-tlabs/3dgrut).
