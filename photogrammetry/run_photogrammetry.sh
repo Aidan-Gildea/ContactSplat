@@ -19,6 +19,8 @@
 #   fuse         colmap stereo_fusion            -> dense/fused.ply
 #   mesh         colmap delaunay_mesher          -> mesh_delaunay.ply
 #   evaluate     photogrammetry/evaluate_mesh.py -> report.json / report.md
+#   decimate     photogrammetry/decimate_mesh.py -> mesh_delaunay_decimated.ply   (only with DECIMATE=1)
+#   evaluate_decimated                           -> report_decimated.json / .md   (only with DECIMATE=1)
 #
 # Knobs (environment variables, all optional):
 #   START=0 DURATION=-1        time window in seconds from the first posed frame (-1 = to end)
@@ -32,6 +34,10 @@
 #   GPU_INDEX=0                CUDA device for SIFT and patch-match
 #   CACHE_GB=16                patch-match / fusion image cache (machine has 31 GB RAM)
 #   EYE_HEIGHT=1.6683          trajectory-to-floor distance used by the evaluator
+#   DECIMATE=0                 1 = also write a simplified copy of the mesh for simulation:
+#                              spikes (edges > 2 m) removed, then quadric decimation at about
+#                              1 cm tolerance (about 13% of triangles), scored like the original.
+#                              The full mesh and report.md are left untouched.
 #   STOP_AFTER=<stage>         stop after that stage (e.g. STOP_AFTER=triangulate to check
 #                              the sparse alignment before spending GPU hours)
 #   FORCE=0                    1 = ignore existing outputs and redo every stage
@@ -64,6 +70,7 @@ CACHE_GB="${CACHE_GB:-16}"
 EYE_HEIGHT="${EYE_HEIGHT:-1.6683}"
 STOP_AFTER="${STOP_AFTER:-}"
 FORCE="${FORCE:-0}"
+DECIMATE="${DECIMATE:-0}"
 PYTHON="${PYTHON:-python}"
 
 IMAGES="$RECT_DIR/images"
@@ -72,6 +79,7 @@ SPARSE_IN="$OUT_DIR/sparse_in"
 SPARSE="$OUT_DIR/sparse"
 DENSE="$OUT_DIR/dense"
 MESH="$OUT_DIR/mesh_delaunay.ply"
+MESH_DECIMATED="$OUT_DIR/mesh_delaunay_decimated.ply"
 
 # --- preflight ---------------------------------------------------------------------------
 [ -d "$IMAGES" ] || { echo "no images/ in $RECT_DIR" >&2; exit 1; }
@@ -242,7 +250,25 @@ run_stage evaluate "$PYTHON" "$HERE/evaluate_mesh.py" \
     --eye_height "$EYE_HEIGHT" \
     --out "$OUT_DIR/report.json"
 
+# --- 10. decimate (optional) -------------------------------------------------------------
+if [ "$DECIMATE" = "1" ]; then
+    run_stage decimate "$PYTHON" "$HERE/decimate_mesh.py" "$MESH" "$MESH_DECIMATED"
+    maybe_stop decimate
+    run_stage evaluate_decimated "$PYTHON" "$HERE/evaluate_mesh.py" \
+        --mesh "$MESH_DECIMATED" \
+        --rectified_dir "$RECT_DIR" \
+        --fused "$DENSE/fused.ply" \
+        --keyframes_json "$OUT_DIR/keyframes.json" \
+        --eye_height "$EYE_HEIGHT" \
+        --out "$OUT_DIR/report_decimated.json"
+fi
+
 echo "Mesh (MPS world frame, metres, Z-up):"
 echo "  $MESH"
 echo "Report:"
 echo "  $OUT_DIR/report.md"
+if [ "$DECIMATE" = "1" ]; then
+    echo "Simplified mesh and its report:"
+    echo "  $MESH_DECIMATED"
+    echo "  $OUT_DIR/report_decimated.md"
+fi

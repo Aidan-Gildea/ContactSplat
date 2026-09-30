@@ -14,8 +14,8 @@
 # Inputs
 #   splat  output/<SCENE>/<RECT>/point_cloud/iteration_30000/point_cloud.ply
 #          (from scripts/bash_local/train_gen2_outside.sh)
-#   mesh   output/photogrammetry/<SCENE>/<RECT>/mesh_delaunay.ply
-#          (from photogrammetry/run_photogrammetry.sh)
+#   mesh   output/photogrammetry/<SCENE>/<RECT>/mesh_delaunay_decimated.ply if it exists
+#          (run_photogrammetry.sh with DECIMATE=1), otherwise mesh_delaunay.ply (full mesh)
 # Output
 #   output/<SCENE>/<RECT>/isaacsim/<SCENE>_with_collider.usdz
 #
@@ -51,7 +51,14 @@ GRUT_PY="${GRUT_PY:-$CONDA_BASE/envs/3dgrut/bin/python}"
 SPLATS_PY="${SPLATS_PY:-$CONDA_BASE/envs/ego_splats/bin/python}"
 
 SPLAT_PLY="$OUTPUT_ROOT/$SCENE/$RECT/point_cloud/iteration_30000/point_cloud.ply"
-MESH_PLY="$OUTPUT_ROOT/photogrammetry/$SCENE/$RECT/mesh_delaunay.ply"
+# Prefer the simplified mesh: same surface to within about 1 cm, about 13% of the triangles,
+# so the file is smaller and Isaac Sim loads the collider faster.
+MESH_DIR="$OUTPUT_ROOT/photogrammetry/$SCENE/$RECT"
+if [ -f "$MESH_DIR/mesh_delaunay_decimated.ply" ]; then
+    MESH_PLY="$MESH_DIR/mesh_delaunay_decimated.ply"
+else
+    MESH_PLY="$MESH_DIR/mesh_delaunay.ply"
+fi
 OUT_DIR="$OUTPUT_ROOT/$SCENE/$RECT/isaacsim"
 OUT_USDZ="$OUT_DIR/${SCENE}_with_collider.usdz"
 

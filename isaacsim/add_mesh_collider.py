@@ -5,7 +5,7 @@ Input
     splat.usdz   NuRec Gaussian volume from 3dgrut's ply_to_usd.py, with the frame fix from
                  scripts/fix_nurec_usdz_frame.py already applied (volume transform = identity)
     mesh.ply     triangle mesh in the same frame, e.g. photogrammetry/run_photogrammetry.sh's
-                 mesh_delaunay.ply
+                 mesh_delaunay.ply or mesh_delaunay_decimated.ply
 
 Both are in the MPS world frame (gravity-aligned, Z-up, metres), so the mesh is added with no
 transform and lines up with the splat exactly.
@@ -41,15 +41,28 @@ COLLIDER_NAME = "collider"
 COLLIDER_FILE = "collider.usdc"
 
 
+def face_index_property(path):
+    """Name of the face index list: COLMAP writes 'vertex_index', Open3D 'vertex_indices'."""
+    with open(path, "rb") as f:
+        for raw in f:
+            line = raw.decode("ascii", "replace").strip()
+            if line.startswith("property list") and line.split()[-1] in ("vertex_index", "vertex_indices"):
+                return line.split()[-1]
+            if line == "end_header":
+                break
+    raise SystemExit(f"{path}: no face vertex_index / vertex_indices property")
+
+
 def read_triangle_mesh(path):
     """Return (points float32 (N,3), triangles int64 (M,3)) from a binary or ASCII PLY."""
+    index_name = face_index_property(path)
     try:  # fast path for fixed-size face lists (plyfile >= 0.8)
-        ply = PlyData.read(path, known_list_len={"face": {"vertex_index": 3}})
+        ply = PlyData.read(path, known_list_len={"face": {index_name: 3}})
     except TypeError:
         ply = PlyData.read(path)
     v = ply["vertex"]
     points = np.column_stack([v["x"], v["y"], v["z"]]).astype(np.float32)
-    faces = ply["face"]["vertex_index"]
+    faces = ply["face"][index_name]
     tris = np.stack(faces) if faces.dtype == object else np.asarray(faces)
     tris = tris.astype(np.int64).reshape(-1, 3)
     return points, tris
