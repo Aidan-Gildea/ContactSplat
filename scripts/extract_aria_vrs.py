@@ -879,6 +879,8 @@ def fetch_visible_depth_map_for_RGB(
             u_rgb, v_rgb, z_rgb, mask = project(
                 pt3d_world, rgb_w2c, rgb_calibK, frame["h"], frame["w"]
             )
+            if u_rgb is None:  # single point, outside the RGB frustum
+                continue
 
             u_chunks.append(u_rgb)
             v_chunks.append(v_rgb)
