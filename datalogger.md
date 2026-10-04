@@ -146,11 +146,35 @@ Outside trajectory, 3 simulated seconds each (`~/contactsplat_runs/drive/diag/`)
 | Outside MPS points (Delaunay) | 471,360 | 2.1 s | not reached in 20 min | > 6 s (est.) |
 
 Both robots spawned and settled (ground clearance 1.4 and 1.5 cm). On August's mesh the robot reached 8 waypoints
-(2.0 m) with no stalls. The drive loop advances physics on every iteration, so the new mesh is not stuck in a logic
-loop: each physics step is slow. Geometry differs in kind, not size: the August mesh has no edge longer than 0.3 m;
-the Delaunay mesh has edges up to 4.5 m, 266 triangles with an edge over 2 m, and triangles up to 5.9 m². Next:
-time individual steps on the decimated mesh and on a copy with long-edge triangles removed. The 43 s world reset seen
-on 10-03 did not recur (2.1 s), so it was not the cause.
+(2.0 m) with no stalls. The 43 s world reset seen on 10-03 did not recur (2.1 s), so it was not the cause.
+(Correction, same day: per-step timing below shows normal steps followed by one step that never returns, not
+uniformly slow steps.)
+
+**2026-10-04 · Drive-test hang narrowed down (Outside).** Per-step timing printed every 10 steps; a stack dump fires
+if one physics step exceeds 60 s. Every hang is inside PhysX `simulate()`, at a fixed place for a given mesh:
+
+| collision mesh | triangles | normal step | hangs at | reproducible |
+|---|---|---|---|---|
+| MPS points, full | 471,360 | ~8 ms (trimmed copy) | 0.9 s sim, near (−0.95, 1.61) | — |
+| MPS points, decimated | 52,397 | ~3 ms | 6.0 s sim, waypoint 16, (−0.14, −1.17) | yes, same step with CCD off |
+| MVS, decimated | 314,204 | ~10 ms | 33.8 s sim, waypoint 73, (3.13, 3.37) | — |
+| MPS points, decimated, non-manifold edges removed | 50,905 | ~2.5 ms | passed waypoint 16; frozen at waypoint 28 from 17 s, then hung in wedge recovery | — |
+
+Turning continuous collision detection off changed nothing. Mesh quality is the clearest difference from August's
+mesh, which drives:
+
+| mesh | edges shared by 3+ triangles | edges with inconsistent winding |
+|---|---|---|
+| August fused (TSDF) | 0 | 0 |
+| MPS points, decimated | 839 | 1,672 |
+| MPS points, full minus >0.5 m edges | 2,919 | 5,807 |
+| MVS, decimated | 1,997 | 3,976 |
+
+Each hang point has non-manifold edges within 0.5 m. Removing them (Open3D) moved the robot past the first hang, so
+they are part of the cause but not all of it; 202 winding flips remain (the mesh is not orientable). Triangle shape
+near the first hang point is unremarkable (no slivers or duplicates). Open: whether the drive test should use repaired
+meshes, PhysX's SDF collision mode, or a re-meshed surface (TSDF / Poisson) for the Delaunay meshes. Drive tests on
+the remaining scenes are on hold until that is decided.
 
 **2026-10-04 · Room sent to a cloud GPU.** RunPod A40 (48 GB, $0.50/hr, on-demand), raw VRS + MPS uploaded from the
 lab, preprocessed and trained there with the lab's exact code (`acbd483`, branch `mps-mesh`) at the full 1.5 M cap.
@@ -160,10 +184,10 @@ Software differs from the lab: Python 3.12, torch 2.8.0+cu128, CUDA 12.8, gsplat
 **2026-10-04 · Lab disk full; queue 2 lost.** At 11:23 the lab's 908 GB disk reached 0 bytes free. park3_0 and
 park3_1 re-preprocessed; park3_2 failed partway (images written, no `transforms_with_sparse_depth.json`); every later
 step failed instantly. The largest project folders: MVS workspaces 70 GB, recordings 165 GB (Room 42, parking 44),
-`lightning_logs` 12 GB. Freed 15 GB by clearing the pip download cache and conda's package tarballs (re-downloadable;
-no project data touched). Queue 3 reruns what fits, with an 8 GB free-space check before every step: drive diagnostic
-v2, park4_0 preprocessing, rolling-shutter-off on park4_0 and Outside, the Gen 1 sample. MVS on the parking walks
-waits for more space.
+`lightning_logs` 12 GB. Freed 31 GB by clearing the pip download cache and conda's package tarballs (re-downloadable;
+no project data touched). Queue 6 (replacing short-lived queues 3–5) checks for 8 GB free before every step and runs:
+park4_0 preprocessing, rolling-shutter-off on park4_0 and Outside, the Gen 1 sample, then MVS on park3_0, park3_1,
+park7_0 and park7_2.
 
 ## Findings so far
 
@@ -180,8 +204,8 @@ waits for more space.
 
 ## Open
 
-- Drive test on the new meshes: physics stepping is the bottleneck (see the 10-04 diagnostic). No drive result yet
-  exists for any recording made after August.
+- Drive test on the new meshes: PhysX hangs on the Delaunay meshes, which have non-manifold edges and inconsistent
+  winding (see "hang narrowed down"). No drive result yet exists for any recording made after August.
 - August artifacts still in the Trash.
 - Room splat at 1.5 M cap on the cloud A40 (running).
 - Lab disk space: MVS on seven parking walks, and re-preprocessing park3_2, park4_1 and park7_1, need about 60 GB.
