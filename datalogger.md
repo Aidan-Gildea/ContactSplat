@@ -157,6 +157,14 @@ lab, preprocessed and trained there with the lab's exact code (`acbd483`, branch
 Software differs from the lab: Python 3.12, torch 2.8.0+cu128, CUDA 12.8, gsplat 1.5.3 (same), projectaria-tools 2.2.0
 (same). Record the GPU wherever Room's splat is quoted.
 
+**2026-10-04 · Lab disk full; queue 2 lost.** At 11:23 the lab's 908 GB disk reached 0 bytes free. park3_0 and
+park3_1 re-preprocessed; park3_2 failed partway (images written, no `transforms_with_sparse_depth.json`); every later
+step failed instantly. The largest project folders: MVS workspaces 70 GB, recordings 165 GB (Room 42, parking 44),
+`lightning_logs` 12 GB. Freed 15 GB by clearing the pip download cache and conda's package tarballs (re-downloadable;
+no project data touched). Queue 3 reruns what fits, with an 8 GB free-space check before every step: drive diagnostic
+v2, park4_0 preprocessing, rolling-shutter-off on park4_0 and Outside, the Gen 1 sample. MVS on the parking walks
+waits for more space.
+
 ## Findings so far
 
 1. **Outdoors, MPS-points meshes match MVS** (coverage 0.873 vs 0.880 on Outside, 0.934 vs 0.938 on park4_0, 0.918 vs
@@ -176,3 +184,4 @@ Software differs from the lab: Python 3.12, torch 2.8.0+cu128, CUDA 12.8, gsplat
   exists for any recording made after August.
 - August artifacts still in the Trash.
 - Room splat at 1.5 M cap on the cloud A40 (running).
+- Lab disk space: MVS on seven parking walks, and re-preprocessing park3_2, park4_1 and park7_1, need about 60 GB.
