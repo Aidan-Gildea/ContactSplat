@@ -126,7 +126,9 @@ and settled the robot on the Outside MPS-points mesh and planned 363 waypoints o
 reached 10 s in 44 minutes (the report writes every 10 simulated seconds). World reset took 43 s, against 7.6 s for
 August's 4.12 M-triangle mesh. Physics stepping on the new mesh is the suspect; diagnostic queued.
 
-**2026-10-04 · Room retried at a 1.0 M Gaussian cap** (running). Report Room's lower cap wherever its splat is quoted.
+**2026-10-04 · Room retried at a 1.0 M Gaussian cap: out of memory again**, at step 7,184 (14.0 GB allocated by
+PyTorch on the 16 GB card), in the backward pass through gsplat. Both failures sit near the end of the first pass over
+the 8,221 frames, so a few close-range indoor frames are the likely peak. Lowering the cap is not enough on 16 GB.
 
 **2026-10-04 · Ablation: decimating the MPS-points meshes.** All twelve decimated to 11–17 % of their triangles at
 ~1 cm tolerance and rescored: coverage and largest hole change by at most 0.01.
@@ -134,6 +136,26 @@ August's 4.12 M-triangle mesh. Physics stepping on the new mesh is the suspect; 
 **2026-10-04 · Ablation queue armed** (starts when Room finishes): drive-test diagnostic (new mesh vs August's, 3
 simulated seconds each); re-preprocess six parking walks; MVS on the seven parking walks that lack it; rolling-shutter
 modelling **off** on Outside and park4_0 (Lv et al.'s contribution); Meta's Gen 1 sample through the Gen 2 port.
+
+**2026-10-04 · Drive-test diagnostic: the hang is the new mesh, not the Isaac Sim setup.** Same script, robot and
+Outside trajectory, 3 simulated seconds each (`~/contactsplat_runs/drive/diag/`):
+
+| collision mesh | triangles | world reset | 3 simulated s | physics step, mean |
+|---|---|---|---|---|
+| August fused (stereo + 2DGS + floor) | 4,120,799 | 2.8 s | done in 3.5 s wall | 19.2 ms |
+| Outside MPS points (Delaunay) | 471,360 | 2.1 s | not reached in 20 min | > 6 s (est.) |
+
+Both robots spawned and settled (ground clearance 1.4 and 1.5 cm). On August's mesh the robot reached 8 waypoints
+(2.0 m) with no stalls. The drive loop advances physics on every iteration, so the new mesh is not stuck in a logic
+loop: each physics step is slow. Geometry differs in kind, not size: the August mesh has no edge longer than 0.3 m;
+the Delaunay mesh has edges up to 4.5 m, 266 triangles with an edge over 2 m, and triangles up to 5.9 m². Next:
+time individual steps on the decimated mesh and on a copy with long-edge triangles removed. The 43 s world reset seen
+on 10-03 did not recur (2.1 s), so it was not the cause.
+
+**2026-10-04 · Room sent to a cloud GPU.** RunPod A40 (48 GB, $0.50/hr, on-demand), raw VRS + MPS uploaded from the
+lab, preprocessed and trained there with the lab's exact code (`acbd483`, branch `mps-mesh`) at the full 1.5 M cap.
+Software differs from the lab: Python 3.12, torch 2.8.0+cu128, CUDA 12.8, gsplat 1.5.3 (same), projectaria-tools 2.2.0
+(same). Record the GPU wherever Room's splat is quoted.
 
 ## Findings so far
 
@@ -150,6 +172,7 @@ modelling **off** on Outside and park4_0 (Lv et al.'s contribution); Meta's Gen 
 
 ## Open
 
-- Drive test on the new meshes (hang under diagnosis). No drive result yet exists for any recording made after August.
+- Drive test on the new meshes: physics stepping is the bottleneck (see the 10-04 diagnostic). No drive result yet
+  exists for any recording made after August.
 - August artifacts still in the Trash.
-- Room splat at 1.0 M cap (running).
+- Room splat at 1.5 M cap on the cloud A40 (running).
