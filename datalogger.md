@@ -20,7 +20,7 @@ and paste the output over the "Results" section. Raw artifacts live on the lab m
   (waypoints every 0.25 m, 0.8 m/s, triangle-mesh collider). One deterministic run per mesh unless stated.
 - Wearer A is 6′1″, wearer B is 5′10″.
 
-## Results (generated 2026-10-04)
+## Results (generated 2026-10-04 23:15 by `scripts/datalog_tables.py`)
 
 ### Recordings
 
@@ -41,19 +41,22 @@ and paste the output over the "Results" section. Raw artifacts live on the lab m
 
 ### Splat quality (held-out frames)
 
-| recording | variant | Gaussian cap | PSNR | SSIM | LPIPS | test frames |
-|---|---|---|---|---|---|---|
-| Outside | RS on | 1.5 M | 25.45 | 0.845 | 0.390 | 585 |
-| Hall | RS on | 1.5 M | 31.52 | 0.871 | 0.585 | 713 |
-| park3_0 | RS on | 1.5 M | 32.05 | 0.867 | 0.605 | 88 |
-| park3_1 | RS on | 1.5 M | 32.32 | 0.868 | 0.592 | 86 |
-| park3_2 | RS on | 1.5 M | 30.95 | 0.862 | 0.605 | 92 |
-| park4_0 | RS on | 1.5 M | 32.27 | 0.869 | 0.642 | 84 |
-| park4_1 | RS on | 1.5 M | 31.76 | 0.867 | 0.629 | 93 |
-| park4_2 | RS on | 1.5 M | 31.42 | 0.865 | 0.654 | 90 |
-| park7_0 | RS on | 1.5 M | 30.21 | 0.836 | 0.668 | 76 |
-| park7_1 | RS on | 1.5 M | 30.61 | 0.839 | 0.659 | 75 |
-| park7_2 | RS on | 1.5 M | 30.82 | 0.841 | 0.646 | 80 |
+| recording | variant | Gaussian cap | Gaussians (final) | PSNR | SSIM | LPIPS | test frames |
+|---|---|---|---|---|---|---|---|
+| Outside | RS on | 1.5 M | 1.50 M | 25.45 | 0.845 | 0.390 | 585 |
+| Outside | RS off | 1.5 M | 1.50 M | 25.33 | 0.843 | 0.393 | 585 |
+| Hall | RS on | 1.5 M | 1.50 M | 31.52 | 0.871 | 0.585 | 713 |
+| Room | RS on | 1.5 M | 2.63 M | 29.87 | 0.892 | 0.521 | 1028 |
+| park3_0 | RS on | 1.5 M | 1.50 M | 32.05 | 0.867 | 0.605 | 88 |
+| park3_1 | RS on | 1.5 M | 1.50 M | 32.32 | 0.868 | 0.592 | 86 |
+| park3_2 | RS on | 1.5 M | 1.50 M | 30.95 | 0.862 | 0.605 | 92 |
+| park4_0 | RS on | 1.5 M | 1.50 M | 32.27 | 0.869 | 0.642 | 84 |
+| park4_0 | RS off | 1.5 M | 1.50 M | 31.55 | 0.865 | 0.650 | 84 |
+| park4_1 | RS on | 1.5 M | 1.50 M | 31.76 | 0.867 | 0.629 | 93 |
+| park4_2 | RS on | 1.5 M | 1.50 M | 31.42 | 0.865 | 0.654 | 90 |
+| park7_0 | RS on | 1.5 M | 1.50 M | 30.21 | 0.836 | 0.668 | 76 |
+| park7_1 | RS on | 1.5 M | 1.50 M | 30.61 | 0.839 | 0.659 | 75 |
+| park7_2 | RS on | 1.5 M | 1.50 M | 30.82 | 0.841 | 0.646 | 80 |
 
 ### Collision meshes (scored with each recording's measured glasses-to-floor height)
 
@@ -188,7 +191,8 @@ Gaussians, above the 1.5 M cap**: Room's MPS output has 4.66 M semi-dense points
 exceeded the cap, and MCMC's cap limits growth but never removes Gaussians. That is the likely reason lowering the cap
 to 1.0 M did not stop the lab's out-of-memory failures. Results (PLY, `test_logs.json`, `cameras.json`, `cfg_args`,
 test renders and depth, pod logs) are on the Mac in `contactsplatai/runpod_results/Room_20260929_211650/`, PLY checksum
-verified; not yet on the lab. Pod terminated. Cost $3.62.
+verified; copied to the lab's `output/` on 10-04 23:10 (checksum matches; the failed 1.0 M run's `cfg_args` and
+`cameras.json` kept alongside with a `.lab-failed-cap1M` suffix). Pod terminated. Cost $3.62.
 
 **2026-10-04 · Lab disk full; queue 2 lost.** At 11:23 the lab's 908 GB disk reached 0 bytes free. park3_0 and
 park3_1 re-preprocessed; park3_2 failed partway (images written, no `transforms_with_sparse_depth.json`); every later
@@ -197,6 +201,23 @@ step failed instantly. The largest project folders: MVS workspaces 70 GB, record
 no project data touched). Queue 6 (replacing short-lived queues 3–5) checks for 8 GB free before every step and runs:
 park4_0 preprocessing, rolling-shutter-off on park4_0 and Outside, the Gen 1 sample, then MVS on park3_0, park3_1,
 park7_0 and park7_2.
+
+**2026-10-04 · Queue 6 results (lab, unattended 12:10–21:34).**
+- **Rolling-shutter modelling off** (Lv et al.'s contribution; otherwise identical settings, single runs): Outside
+  PSNR 25.45 → 25.33 (−0.12 dB), LPIPS 0.390 → 0.393; park4_0 PSNR 32.27 → 31.55 (−0.72 dB), LPIPS 0.642 → 0.650.
+  Modelling rolling shutter helps on both, more on the short parking walk. Two scenes, one run each: an observation, not
+  a significance claim.
+- **Meta's Gen 1 sample through the Gen 2 port**: trains and scores normally (PSNR 28.95, SSIM 0.944, LPIPS 0.308,
+  39 test frames, 1200 × 2400 rectification). The port did not break Gen 1 input.
+- **Gaussian cap check**: every scene except Room ends at exactly 1.50 M Gaussians, so the cap binds there. Room
+  (2.63 M) is the only scene whose initial cloud exceeded the cap. The table script now reads the cap from each run's
+  `cfg_args` and the final count from its PLY instead of hard-coding them.
+- **MVS on park3_0, park3_1, park7_0 failed instantly**: their workspaces date from 10-01 and keep `.done` markers for
+  stages whose outputs (`database.db`, `dense/`) no longer exist, so the script skips to stereo and COLMAP aborts
+  reading an empty workspace. They need a fresh workspace.
+- **MVS on park7_2 stopped after stereo (77 min)**: 279 of 280 depth maps. COLMAP skipped one frame
+  (`camera-rgb_678777965643.png`) because it has no source images, which is normal; the pipeline's check requires every
+  frame, so fusion and meshing never ran. The 6.4 GB stereo workspace is kept. Lab disk now 9 GB free.
 
 ## Findings so far
 
@@ -216,6 +237,7 @@ park7_0 and park7_2.
 - Drive test on the new meshes: PhysX hangs on the Delaunay meshes, which have non-manifold edges and inconsistent
   winding (see "hang narrowed down"). No drive result yet exists for any recording made after August.
 - August artifacts still in the Trash.
-- Room splat: copy `runpod_results/Room_20260929_211650/` to the lab's `output/` and rerun `datalog_tables.py` so it
-  joins the generated table. Check the initial Gaussian count on the other scenes too: the cap may be inert there.
-- Lab disk space: MVS on seven parking walks, and re-preprocessing park3_2, park4_1 and park7_1, need about 60 GB.
+- MVS check in `photogrammetry/run_photogrammetry.sh` fails a run when COLMAP legitimately skips a frame (park7_2).
+  Decide whether to accept COLMAP-skipped frames; then park7_2 needs only fusion and meshing.
+- Stale 10-01 MVS workspaces for park3_0, park3_1 and park7_0 must be moved aside before rerunning.
+- Lab disk space (9 GB free): each parking MVS needs ~7 GB; re-preprocessing park3_2, park4_1 and park7_1 ~15 GB.

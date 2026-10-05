@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Print the datalogger's results tables as markdown, straight from the result files. Never hand-edit the output."""
-import json, glob, os, statistics as st
+import json, glob, os, re, statistics as st
 import sys
 O = sys.argv[1] if len(sys.argv) > 1 else "output"   # the repo's output/ folder
 # Usage: python scripts/datalog_tables.py [output_dir] > tables.md
@@ -17,13 +17,26 @@ for s in SCENES:
     cams = f"{O}/{s}/{RECT}/cameras.json"
     n = (lambda j: len(j["train"]) + len(j["test"]))(json.load(open(cams))) if os.path.exists(cams) else "—"   # valid == test split
     print(f"| {short(s)} | {ENV.get(s,'outdoor')} | {WEARER.get(s,'B (5′10″)')} | {n} | {H[s]:.3f} m |")
-print("\n### Splat quality (held-out frames)\n\n| recording | variant | Gaussian cap | PSNR | SSIM | LPIPS | test frames |\n|---|---|---|---|---|---|---|")
+def cap_of(d):
+    """The MCMC cap_max this run was trained with, read from its cfg_args."""
+    m = re.search(r"'cap_max':\s*(\d+)", open(f"{d}/cfg_args").read()) if os.path.exists(f"{d}/cfg_args") else None
+    return f"{int(m.group(1)) / 1e6:.1f} M" if m else "—"
+def gaussians_of(d):
+    """Final Gaussian count, from the 'element vertex N' line of the newest point_cloud.ply header."""
+    plys = sorted(glob.glob(f"{d}/point_cloud/iteration_*/point_cloud.ply"), key=lambda p: int(p.split("iteration_")[1].split("/")[0]))
+    if not plys: return "—"
+    with open(plys[-1], "rb") as fh:
+        for line in fh:
+            if line.startswith(b"element vertex"): return f"{int(line.split()[2]) / 1e6:.2f} M"
+            if line.startswith(b"end_header"): break
+    return "—"
+print("\n### Splat quality (held-out frames)\n\n| recording | variant | Gaussian cap | Gaussians (final) | PSNR | SSIM | LPIPS | test frames |\n|---|---|---|---|---|---|---|---|")
 for s in SCENES:
     for var, sub in (("RS on", RECT), ("RS off", RECT + "-rsoff")):
-        f = f"{O}/{s}/{sub}/test_logs.json"
+        d = f"{O}/{s}/{sub}"; f = f"{d}/test_logs.json"
         if not os.path.exists(f): continue
-        j = json.load(open(f)); cap = "1.0 M" if (s.startswith("Room") and var == "RS on") else "1.5 M"
-        print(f"| {short(s)} | {var} | {cap} | {mean(j['psnr']):.2f} | {mean(j['ssim']):.3f} | {mean(j['lpips']):.3f} | {len(j['psnr'])} |")
+        j = json.load(open(f))
+        print(f"| {short(s)} | {var} | {cap_of(d)} | {gaussians_of(d)} | {mean(j['psnr']):.2f} | {mean(j['ssim']):.3f} | {mean(j['lpips']):.3f} | {len(j['psnr'])} |")
 print("\n### Collision meshes (scored with each recording's measured glasses-to-floor height)\n")
 print("| recording | method | triangles | floor coverage | largest hole (m²) | floor height error, median (cm) |\n|---|---|---|---|---|---|")
 for s in SCENES:
