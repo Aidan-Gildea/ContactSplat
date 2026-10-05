@@ -181,6 +181,15 @@ lab, preprocessed and trained there with the lab's exact code (`acbd483`, branch
 Software differs from the lab: Python 3.12, torch 2.8.0+cu128, CUDA 12.8, gsplat 1.5.3 (same), projectaria-tools 2.2.0
 (same). Record the GPU wherever Room's splat is quoted.
 
+**2026-10-04/05 · Room trained (cloud A40).** Preprocessing on the pod took 2 h 56 min (rectifying 8,221 full-resolution
+frames on 9 vCPUs); training 30,000 steps took 2 h 53 min including test rendering, at 3–4 steps/s, peak GPU memory
+under 9 GB of 46. Held-out frames (n = 1,028): **PSNR 29.87, SSIM 0.892, LPIPS 0.521**. Final model: **2,625,293
+Gaussians, above the 1.5 M cap**: Room's MPS output has 4.66 M semi-dense points, so the filtered initial cloud already
+exceeded the cap, and MCMC's cap limits growth but never removes Gaussians. That is the likely reason lowering the cap
+to 1.0 M did not stop the lab's out-of-memory failures. Results (PLY, `test_logs.json`, `cameras.json`, `cfg_args`,
+test renders and depth, pod logs) are on the Mac in `contactsplatai/runpod_results/Room_20260929_211650/`, PLY checksum
+verified; not yet on the lab. Pod terminated. Cost $3.62.
+
 **2026-10-04 · Lab disk full; queue 2 lost.** At 11:23 the lab's 908 GB disk reached 0 bytes free. park3_0 and
 park3_1 re-preprocessed; park3_2 failed partway (images written, no `transforms_with_sparse_depth.json`); every later
 step failed instantly. The largest project folders: MVS workspaces 70 GB, recordings 165 GB (Room 42, parking 44),
@@ -207,5 +216,6 @@ park7_0 and park7_2.
 - Drive test on the new meshes: PhysX hangs on the Delaunay meshes, which have non-manifold edges and inconsistent
   winding (see "hang narrowed down"). No drive result yet exists for any recording made after August.
 - August artifacts still in the Trash.
-- Room splat at 1.5 M cap on the cloud A40 (running).
+- Room splat: copy `runpod_results/Room_20260929_211650/` to the lab's `output/` and rerun `datalog_tables.py` so it
+  joins the generated table. Check the initial Gaussian count on the other scenes too: the cap may be inert there.
 - Lab disk space: MVS on seven parking walks, and re-preprocessing park3_2, park4_1 and park7_1, need about 60 GB.
