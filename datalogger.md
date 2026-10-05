@@ -231,6 +231,10 @@ park7_0 and park7_2.
    off; measured per walk, the error is 2–3 cm.
 5. **Splat PSNR flatters the parking walks**: PSNR 30–32 but LPIPS 0.59–0.67, against 0.39 on Outside. Look at renders
    before quoting PSNR.
+6. **Rolling-shutter modelling helps a little**: turning it off cost 0.12 dB on Outside and 0.72 dB on park4_0 (single
+   runs).
+7. **The new Delaunay meshes do not yet survive the drive test**: PhysX hangs at fixed spots on meshes with
+   non-manifold edges; August's TSDF mesh, which has none, drives.
 
 ## Open
 
