@@ -3,7 +3,8 @@
 import json, glob, os, re, statistics as st
 import sys
 O = sys.argv[1] if len(sys.argv) > 1 else "output"   # the repo's output/ folder
-# Usage: python scripts/datalog_tables.py [output_dir] > tables.md
+DRIVE = sys.argv[2] if len(sys.argv) > 2 else None    # optional folder of drive-test report JSONs
+# Usage: python scripts/datalog_tables.py [output_dir] [drive_reports_dir] > tables.md
 RECT = "camera-rgb-rectified-1008-h1512"
 SCENES = ["Outside_20260812_141244", "Hall_20260929_213101", "Room_20260929_211650"] + [f"park{a}_{b}" for a in (3, 4, 7) for b in range(3)]
 ENV = {"Outside_20260812_141244": "outdoor", "Hall_20260929_213101": "indoor", "Room_20260929_211650": "indoor"}
@@ -50,3 +51,30 @@ for s in SCENES:
                 f = f0
             j = json.load(open(f)); fl = j["floor"]; e = fl["height_error_covered_cm"]["median"]
             print(f"| {short(s)} | {label}{suf} | {j['hygiene']['triangles']:,} | {fl['coverage']:.3f} | {fl['largest_hole_m2']:.2f} | {e:.1f} |")
+
+def mesh_label(p):
+    """Readable name for a drive test's collision mesh, from its path."""
+    if "Trash" in p and "fused" in p: return "August fused (TSDF)"
+    if "remesh" in p: return "MPS points, voxel remesh"
+    if "hang_probe" in p and "split" in p: return "MPS points, decimated, defects split"
+    kind = "MVS" if "/photogrammetry/" in p else "MPS points" if "/mps-mesh/" in p else os.path.basename(p)
+    return kind + (", decimated" if "decimated" in p else ", full")
+
+if DRIVE and os.path.isdir(DRIVE):
+    rows = []
+    for f in sorted(glob.glob(f"{DRIVE}/*.json")):
+        j = json.load(open(f)); po = j.get("physics_overrides")
+        if po is None: continue   # only runs from the harness that records its physics settings
+        hung = j.get("status") != "finished"
+        rows.append((os.path.basename(f)[:-5], mesh_label(j.get("collision_input", "")),
+                     "convex" if po.get("approx_cylinders") else "cylinder", "GPU" if po.get("gpu_dynamics") else "CPU",
+                     j.get("approximation", "?"), "hung" if hung else j.get("outcome", "?"),
+                     None if hung else j.get("completion_frac"), j.get("distance_before_first_wedge_m"),
+                     None if hung else j.get("n_wedge_teleports"), None if hung else j.get("step_ms_mean"), j.get("total_path_m")))
+    if rows:
+        print(f"\n### Drive tests (Nova Carter along the walked path, {rows[0][10]:.1f} m)\n")
+        print("| run | collision mesh | wheels | physics | collider | outcome | path covered | before first stuck (m) | teleports | ms / step |")
+        print("|---|---|---|---|---|---|---|---|---|---|")
+        fm = lambda v, s: "—" if v is None else s.format(v)
+        for r in rows:
+            print(f"| {r[0]} | {r[1]} | {r[2]} | {r[3]} | {r[4]} | {r[5]} | {fm(r[6], '{:.0%}')} | {fm(r[7], '{:.1f}')} | {fm(r[8], '{:d}')} | {fm(r[9], '{:.1f}')} |")

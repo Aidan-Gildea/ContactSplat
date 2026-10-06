@@ -20,7 +20,7 @@ and paste the output over the "Results" section. Raw artifacts live on the lab m
   (waypoints every 0.25 m, 0.8 m/s, triangle-mesh collider). One deterministic run per mesh unless stated.
 - Wearer A is 6′1″, wearer B is 5′10″.
 
-## Results (generated 2026-10-04 23:15 by `scripts/datalog_tables.py`)
+## Results (generated 2026-10-05 21:30 by `scripts/datalog_tables.py output ~/contactsplat_runs/drive/reports`)
 
 ### Recordings
 
@@ -94,6 +94,20 @@ and paste the output over the "Results" section. Raw artifacts live on the lab m
 | park7_1 | MPS points · decimated | 21,413 | 0.894 | 1.25 | 2.6 |
 | park7_2 | MPS points | 164,362 | 0.920 | 1.16 | 2.7 |
 | park7_2 | MPS points · decimated | 21,780 | 0.923 | 1.17 | 2.6 |
+
+### Drive tests (Nova Carter along the walked path, 90.6 m)
+
+| run | collision mesh | wheels | physics | collider | outcome | path covered | before first stuck (m) | teleports | ms / step |
+|---|---|---|---|---|---|---|---|---|---|
+| control_aug_fused_full | August fused (TSDF) | cylinder | CPU | none | tipped | 49% | 18.5 | 3 | 10.8 |
+| cpu_convexwheels_lift25_mvsdec_full | MVS, decimated | convex | CPU | none | tipped | 80% | 41.1 | 3 | 9.8 |
+| cpu_convexwheels_mpsdec_full | MPS points, decimated | convex | CPU | none | completed_with_recoveries | 100% | 7.0 | 9 | 3.7 |
+| cpu_convexwheels_mpsfull_full | MPS points, full | convex | CPU | none | tipped | 31% | 0.8 | 3 | 20.6 |
+| cpu_convexwheels_mvsdec_full | MVS, decimated | convex | CPU | none | tipped | 80% | 41.1 | 4 | 10.4 |
+| gpu_convexwheels_mpsdec_full | MPS points, decimated | convex | GPU | none | tipped | 82% | 12.0 | 6 | 10.3 |
+| remesh_vox6cm_carveUp_cpu_full | MPS points, voxel remesh | cylinder | CPU | none | completed_with_recoveries | 100% | 12.0 | 11 | 8.6 |
+| sdf512_mpsdec_full | MPS points, decimated | cylinder | CPU | sdf | hung | — | — | — | — |
+| split_weld0_mpsdec_cpu_full | MPS points, decimated, defects split | cylinder | CPU | none | tipped | 93% | 7.3 | 8 | 3.1 |
 
 ## Log
 
@@ -219,6 +233,42 @@ park7_0 and park7_2.
   (`camera-rgb_678777965643.png`) because it has no source images, which is normal; the pipeline's check requires every
   frame, so fusion and meshing never ran. The 6.4 GB stereo workspace is kept. Lab disk now 9 GB free.
 
+**2026-10-05 · Drive-test hang fixed; first full-path drives on the new meshes.** Nine runs on Outside, one Isaac Sim
+process at a time, all reports in `~/contactsplat_runs/drive/reports/` (table above; an independent check matched every
+number to its file). Harness: `~/contactsplat_runs/drive/sim_drive_test_hang.py`, a copy of the drive script with switches
+for physics settings, which it records in each report under `physics_overrides`.
+- **The fix:** treating the robot's wheels as convex hulls instead of PhysX's special cylinder shapes
+  (`/physics/collisionApproximateCylinders = true`, flag `--approx-cylinders`) removed the hang on all three meshes that
+  hung: MPS points decimated, MPS points full, MVS decimated. On the unmodified MPS-points decimated mesh the robot
+  covered the whole 90.6 m path at 3.7 ms per step, with no fall-throughs. The mesh is untouched, so its floor scores are
+  unchanged. Splitting the mesh's topology defects (no physics change) also removed the hang. SDF collision at
+  resolution 512 did not: it froze at the same step.
+- **What the hang is:** one PhysX worker thread spinning at 100% CPU inside `libomni.physx.plugin.so` while every other
+  thread waits; an endless loop, not a deadlock. Which code loops is not localized: the PhysX library is statically
+  linked into that file, and the wheel change also changes the robot's path.
+- **"Path covered" counts teleports.** When the robot is stuck three times at one waypoint, the harness teleports it past
+  the blockage. The 100% run needed 9 teleports (27 waypoints skipped); its first stuck point came after 7.0 m. Report
+  distance before the first stuck point alongside path covered.
+- **August's mesh does not complete the path either.** Its first saved full-path run covered 49% (44.3 m) and tipped at
+  sim 171.6 s, shortly after its third teleport. The "100% drive" in August's prose has no report and is not reproduced
+  by this harness. Its floor coverage, re-scored with the same evaluator: 0.968.
+- **Most tip-overs are harness artefacts:** 4 of the 6 tipped runs tipped right after a teleport's settle steps, pushed
+  upward by geometry at the landing spot; dropping the robot from 0.25 m instead of 0.10 m changed nothing.
+- **Voxel remesh** (6 cm voxels, marching cubes, band around the path) also completes with standard wheels, at a
+  fidelity cost: floor coverage 0.848 against 0.873 for its source mesh, largest hole 3.51 against 2.42 m².
+- Single runs; Room and Hall not yet drive-tested; the lab CPU runs in a power-saving profile, so step times are
+  inflated.
+
+**2026-10-05 · Isaac Sim figure renders.** Headless NuRec rendering works in Isaac Sim 5.1 (Replicator "rgb" annotator,
+timeline never played, so physics never steps). 27 images, 1600 × 1200, on the Mac in
+`contactsplatai/figures/{outside,room,hall}/` with a `manifest.json` of camera poses per scene; scripts in
+`~/contactsplat_runs/figures/`. Per scene: the splat from a held-out frame's pose (framing matches the real frame), the
+same view with the collider overlaid, a split splat | collider view, the collider alone, and a third-person view with a
+Nova Carter placed kinematically on the floor. Outside's USDZ is the existing one, whose collider is the **MVS**
+decimated mesh. New USDZs for Room and Hall with the **MPS-points** decimated collider are in
+`~/contactsplat_runs/figures/usdz_root_mpsmesh/` (310 MB and 177 MB). An independent check passed every image except
+the two Room robot shots (splat floaters over the wheels, bed edge hiding the contact); the Room walk views are fine.
+
 ## Findings so far
 
 1. **Outdoors, MPS-points meshes match MVS** (coverage 0.873 vs 0.880 on Outside, 0.934 vs 0.938 on park4_0, 0.918 vs
@@ -233,13 +283,14 @@ park7_0 and park7_2.
    before quoting PSNR.
 6. **Rolling-shutter modelling helps a little**: turning it off cost 0.12 dB on Outside and 0.72 dB on park4_0 (single
    runs).
-7. **The new Delaunay meshes do not yet survive the drive test**: PhysX hangs at fixed spots on meshes with
-   non-manifold edges; August's TSDF mesh, which has none, drives.
+7. **The new meshes drive once the wheels are convex hulls**: the MPS-points decimated mesh covers the full Outside path
+   (with 9 teleports past stuck points), while August's TSDF mesh covers 49% under the same harness. PhysX's cylinder
+   wheels hang on the Delaunay meshes.
 
 ## Open
 
-- Drive test on the new meshes: PhysX hangs on the Delaunay meshes, which have non-manifold edges and inconsistent
-  winding (see "hang narrowed down"). No drive result yet exists for any recording made after August.
+- Drive test: decide the paper's configuration (convex wheels on the unmodified mesh is the smallest change) and how to
+  report teleports; run it on Room and Hall; consider fixing the teleport landing that causes most tip-overs.
 - August artifacts still in the Trash.
 - MVS check in `photogrammetry/run_photogrammetry.sh` fails a run when COLMAP legitimately skips a frame (park7_2).
   Decide whether to accept COLMAP-skipped frames; then park7_2 needs only fusion and meshing.
