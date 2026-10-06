@@ -43,7 +43,7 @@ stage, and stages 4.2 and 4.3 are independent of each other. Rounded nodes are e
 variables set with `export`.
 
 ```mermaid
-flowchart LR
+flowchart TD
     vrs[/"Aria recording<br/>$REC_ROOT/SCENE.vrs"/] --> S1
     mps[/"MPS SLAM output<br/>$REC_ROOT/mps_SCENE_vrs/slam/<br/>closed_loop_trajectory.csv<br/>semidense_points.csv.gz<br/>online_calibration.jsonl"/] --> S1
 
