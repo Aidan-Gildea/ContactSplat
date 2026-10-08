@@ -12,6 +12,11 @@
 #   RECT          rectified folder name, default camera-rgb-rectified-${RGB_FOCAL}-h${RGB_HEIGHT}
 #   OUTPUT_ROOT   where trained models go, default <repo>/output
 #   CAP_MAX       MCMC Gaussian ceiling, default 1500000 (see the memory notes below)
+#   ITERATIONS    training steps, default 30000
+#   ROLLING_SHUTTER / RS_START   rolling-shutter rendering on/off and the step it starts, default true / 10000
+#   DEPTH_LOSS    also fit the MPS sparse depth, default false
+#   TRAIN_SPLIT   7-1 (every 8th frame held out for testing) or all, default 7-1
+# run_contactsplat.sh sets all of these and explains each one.
 
 set -euo pipefail
 
@@ -23,6 +28,11 @@ RGB_HEIGHT="${RGB_HEIGHT:-1512}"
 RECT="${RECT:-camera-rgb-rectified-${RGB_FOCAL}-h${RGB_HEIGHT}}"   # must match the preprocessing output folder
 EXP_NAME="$SCENE/$RECT"                                            # model_path = OUTPUT_ROOT/EXP_NAME
 CAP_MAX="${CAP_MAX:-1500000}"
+ITERATIONS="${ITERATIONS:-30000}"
+ROLLING_SHUTTER="${ROLLING_SHUTTER:-true}"
+RS_START="${RS_START:-10000}"
+DEPTH_LOSS="${DEPTH_LOSS:-false}"
+TRAIN_SPLIT="${TRAIN_SPLIT:-7-1}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -52,28 +62,28 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Peak memory is driven by the rasteriser's Gaussian-tile intersection buffers,
 # which scale with BOTH the Gaussian count and the pixel count. Capping only the
 # Gaussian count (cap_max=3M at full 2016x1512) still OOM'd at 14.3 GB genuinely
-# allocated. These three settings together leave real headroom on 16 GB:
+# allocated. cap_max=1.5M fits the outdoor recordings on 16 GB; the indoor Room
+# recording did not fit even at 1.0M and was trained on a 48 GB GPU.
 #
-#   data_factor=2   1008x756 -- 4x fewer pixels, so ~4x fewer intersections
-#   cap_max=1.5M    half the Gaussian ceiling
-#   pcd_stride=2    start from ~2.1M init points instead of ~4.3M
-#
-# On a 24 GB+ GPU, drop data_factor and raise CAP_MAX for a sharper result.
+# scene.data_factor and scene.pcd_stride are not read by any code, so training
+# always uses full-resolution frames and every MPS point; they are not set here.
 python train_lightning.py \
     train_model=3dgs \
     opt=simple_gsplat_30K \
     opt.densification_strategy=MCMC \
     opt.mcmc_strategy.cap_max="$CAP_MAX" \
-    opt.handle_rolling_shutter=true \
+    opt.iterations="$ITERATIONS" \
+    opt.handle_rolling_shutter="$ROLLING_SHUTTER" \
+    opt.handle_rolling_shutter_start_iter="$RS_START" \
+    opt.depth_loss="$DEPTH_LOSS" \
     scene.data_root="$OUT_ROOT" \
     scene.scene_name="$SCENE/$RECT" \
     scene.input_format="aria" \
-    scene.data_factor=2 \
-    scene.pcd_stride=2 \
+    scene.train_split="$TRAIN_SPLIT" \
     exp_name="$EXP_NAME" \
     output_root="$OUTPUT_ROOT" \
     viewer.use_trainer_viewer=false
 
 echo
 echo "Trained PLY:"
-echo "  $OUTPUT_ROOT/$EXP_NAME/point_cloud/iteration_30000/point_cloud.ply"
+echo "  $OUTPUT_ROOT/$EXP_NAME/point_cloud/iteration_${ITERATIONS}/point_cloud.ply"
