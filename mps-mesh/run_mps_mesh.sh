@@ -12,12 +12,17 @@
 #   [out_dir]        default <repo>/output/mps-mesh/<recording>/<rectified folder>
 #
 # Stages (each skipped when its output already exists; FORCE=1 reruns everything):
-#   prepare   mps-mesh/mps_points_to_colmap.py  -> dense/fused.ply + fused.ply.vis + dense/sparse
-#   mesh      colmap delaunay_mesher            -> mesh_delaunay.ply
-#   evaluate  photogrammetry/evaluate_mesh.py   -> report.json / report.md
+#   prepare             mps-mesh/mps_points_to_colmap.py  -> dense/fused.ply + fused.ply.vis + dense/sparse
+#   mesh                colmap delaunay_mesher            -> mesh_delaunay.ply
+#   evaluate            photogrammetry/evaluate_mesh.py   -> report.json / report.md
+#   decimate            photogrammetry/decimate_mesh.py   -> mesh_delaunay_decimated.ply
+#   evaluate_decimated  photogrammetry/evaluate_mesh.py   -> report_decimated.json / .md
 #
 # Knobs (environment variables, all optional):
 #   EYE_HEIGHT=1.6683   trajectory-to-floor distance used by the evaluator
+#   DECIMATE=1          also write the simplified copy that isaacsim/export_isaacsim_usdz.sh
+#                       uses as the collider (0 = full mesh only). On by default here, unlike
+#                       run_photogrammetry.sh, because this is the default collider route.
 #   FORCE=0             1 = ignore existing outputs and redo every stage
 #   PYTHON=python       interpreter with numpy, pandas, open3d (ego_splats env)
 
@@ -35,11 +40,13 @@ mkdir -p "$OUT_DIR/logs" "$OUT_DIR/.done"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 EYE_HEIGHT="${EYE_HEIGHT:-1.6683}"
+DECIMATE="${DECIMATE:-1}"
 FORCE="${FORCE:-0}"
 PYTHON="${PYTHON:-python}"
 
 DENSE="$OUT_DIR/dense"
 MESH="$OUT_DIR/mesh_delaunay.ply"
+MESH_DECIMATED="$OUT_DIR/mesh_delaunay_decimated.ply"
 
 # --- preflight ---------------------------------------------------------------------------
 [ -e "$RECT_DIR/semidense_points.csv.gz" ] || { echo "no semidense_points.csv.gz in $RECT_DIR" >&2; exit 1; }
@@ -95,7 +102,26 @@ run_stage evaluate "$PYTHON" "$REPO_ROOT/photogrammetry/evaluate_mesh.py" \
     --eye_height "$EYE_HEIGHT" \
     --out "$OUT_DIR/report.json"
 
+# --- 4. decimate (default on) ------------------------------------------------------------
+# Same simplification as run_photogrammetry.sh DECIMATE=1: drop >2 m spike triangles, then
+# quadric-error decimation at about 1 cm. On the 12 recordings this kept 4-17% of the
+# triangles with floor coverage within 0.011 of the full mesh.
+if [ "$DECIMATE" = "1" ]; then
+    run_stage decimate "$PYTHON" "$REPO_ROOT/photogrammetry/decimate_mesh.py" "$MESH" "$MESH_DECIMATED"
+    run_stage evaluate_decimated "$PYTHON" "$REPO_ROOT/photogrammetry/evaluate_mesh.py" \
+        --mesh "$MESH_DECIMATED" \
+        --rectified_dir "$RECT_DIR" \
+        --fused "$DENSE/fused.ply" \
+        --eye_height "$EYE_HEIGHT" \
+        --out "$OUT_DIR/report_decimated.json"
+fi
+
 echo "Mesh (MPS world frame, metres, Z-up):"
 echo "  $MESH"
 echo "Report:"
 echo "  $OUT_DIR/report.md"
+if [ "$DECIMATE" = "1" ]; then
+    echo "Simplified mesh, used as the Isaac Sim collider:"
+    echo "  $MESH_DECIMATED"
+    echo "  $OUT_DIR/report_decimated.md"
+fi

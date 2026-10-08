@@ -14,9 +14,14 @@ mps-mesh/run_mps_mesh.sh
         │  prepare: confident semi-dense points + their SLAM-camera views → COLMAP dense workspace
         │  mesh:    colmap delaunay_mesher (default options)
         │  evaluate: photogrammetry/evaluate_mesh.py
+        │  decimate: photogrammetry/decimate_mesh.py (DECIMATE=1, the default) + evaluate again
         ▼
-output/mps-mesh/<recording>/<rectified folder>/mesh_delaunay.ply   + report.md
+output/mps-mesh/<recording>/<rectified folder>/mesh_delaunay.ply            + report.md
+output/mps-mesh/<recording>/<rectified folder>/mesh_delaunay_decimated.ply  + report_decimated.md
 ```
+
+The decimated mesh is the default collider: `isaacsim/export_isaacsim_usdz.sh` packages it
+unless `MESH_SOURCE=mvs` is set.
 
 ## What `prepare` writes
 
@@ -55,7 +60,8 @@ bash mps-mesh/run_mps_mesh.sh "$OUT_ROOT/$SCENE/camera-rgb-rectified-1008-h1512"
 The MPS `slam/` folder must still hold `semidense_observations.csv.gz` and
 `online_calibration.jsonl` next to the points file. Each stage is skipped when it has
 already completed; `FORCE=1` redoes everything. Other knobs: `EYE_HEIGHT` (default
-`1.6683`, passed to the evaluator) and `PYTHON`.
+`1.6683`, passed to the evaluator), `DECIMATE` (default `1`; `0` skips the simplified copy)
+and `PYTHON`.
 
 ## Reading the report
 

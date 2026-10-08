@@ -27,3 +27,7 @@ natsort
 viser>=0.2.3
 exifread
 gsplat>=1.4.0
+open3d
+projectaria-mps
+usd-core
+msgpack

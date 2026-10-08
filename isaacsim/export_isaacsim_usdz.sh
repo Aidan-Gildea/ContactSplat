@@ -1,5 +1,5 @@
 #!/bin/bash
-# Package a trained Gaussian splat and its COLMAP mesh into ONE .usdz for Isaac Sim.
+# Package a trained Gaussian splat and its collision mesh into ONE .usdz for Isaac Sim.
 #
 #   splat  -> visible   (NuRec Gaussian volume, rendered by Isaac Sim's RTX renderer)
 #   mesh   -> invisible static collider (robots drive on it and bump into it)
@@ -14,8 +14,9 @@
 # Inputs
 #   splat  output/<SCENE>/<RECT>/point_cloud/iteration_30000/point_cloud.ply
 #          (from scripts/bash_local/train_gen2_outside.sh)
-#   mesh   output/photogrammetry/<SCENE>/<RECT>/mesh_delaunay_decimated.ply if it exists
-#          (run_photogrammetry.sh with DECIMATE=1), otherwise mesh_delaunay.ply (full mesh)
+#   mesh   output/mps-mesh/<SCENE>/<RECT>/mesh_delaunay_decimated.ply if it exists
+#          (mps-mesh/run_mps_mesh.sh), otherwise mesh_delaunay.ply (full mesh).
+#          MESH_SOURCE=mvs uses output/photogrammetry/... (run_photogrammetry.sh) instead.
 # Output
 #   output/<SCENE>/<RECT>/isaacsim/<SCENE>_with_collider.usdz
 #
@@ -27,6 +28,7 @@
 #
 # Needs two conda envs: ego_splats (step 1) and 3dgrut (steps 2-4), plus a 3dgrut checkout.
 # Optional overrides, only if your layout differs:
+#   MESH_SOURCE=mps | mvs            which collision mesh to package (default mps)
 #   RGB_FOCAL=1008 RGB_HEIGHT=1512   or RECT   rectified folder name
 #   OUTPUT_ROOT   default <repo>/output
 #   GRUT_REPO     default $HOME/3dgrut
@@ -51,9 +53,18 @@ GRUT_PY="${GRUT_PY:-$CONDA_BASE/envs/3dgrut/bin/python}"
 SPLATS_PY="${SPLATS_PY:-$CONDA_BASE/envs/ego_splats/bin/python}"
 
 SPLAT_PLY="$OUTPUT_ROOT/$SCENE/$RECT/point_cloud/iteration_30000/point_cloud.ply"
-# Prefer the simplified mesh: same surface to within about 1 cm, about 13% of the triangles,
-# so the file is smaller and Isaac Sim loads the collider faster.
-MESH_DIR="$OUTPUT_ROOT/photogrammetry/$SCENE/$RECT"
+# Which mesh becomes the collider. MESH_SOURCE=mps (default) uses the mesh built from the MPS
+# semi-dense points (mps-mesh/run_mps_mesh.sh, about a minute per recording); MESH_SOURCE=mvs
+# uses the COLMAP multi-view stereo mesh (photogrammetry/run_photogrammetry.sh, hours).
+# Outdoors the two cover the floor about equally; see README section 4.3.
+MESH_SOURCE="${MESH_SOURCE:-mps}"
+case "$MESH_SOURCE" in
+    mps) MESH_DIR="$OUTPUT_ROOT/mps-mesh/$SCENE/$RECT";       MESH_SCRIPT="mps-mesh/run_mps_mesh.sh" ;;
+    mvs) MESH_DIR="$OUTPUT_ROOT/photogrammetry/$SCENE/$RECT"; MESH_SCRIPT="photogrammetry/run_photogrammetry.sh" ;;
+    *)   echo "MESH_SOURCE must be mps or mvs, not '$MESH_SOURCE'" >&2; exit 1 ;;
+esac
+# Prefer the simplified mesh: same surface to within about 1 cm and a fraction of the
+# triangles, so the file is smaller and physics steps are faster.
 if [ -f "$MESH_DIR/mesh_delaunay_decimated.ply" ]; then
     MESH_PLY="$MESH_DIR/mesh_delaunay_decimated.ply"
 else
@@ -64,7 +75,7 @@ OUT_USDZ="$OUT_DIR/${SCENE}_with_collider.usdz"
 
 # --- preflight ---------------------------------------------------------------------------
 [ -f "$SPLAT_PLY" ] || { echo "No trained splat at: $SPLAT_PLY" >&2; echo "Run scripts/bash_local/train_gen2_outside.sh first." >&2; exit 1; }
-[ -f "$MESH_PLY" ]  || { echo "No mesh at: $MESH_PLY" >&2; echo "Run photogrammetry/run_photogrammetry.sh first." >&2; exit 1; }
+[ -f "$MESH_PLY" ]  || { echo "No mesh at: $MESH_PLY" >&2; echo "Run $MESH_SCRIPT first (or set MESH_SOURCE)." >&2; exit 1; }
 [ -f "$GRUT_REPO/threedgrut/export/scripts/ply_to_usd.py" ] || { echo "No 3dgrut checkout at: $GRUT_REPO (set GRUT_REPO)" >&2; exit 1; }
 for py in "$GRUT_PY" "$SPLATS_PY"; do
     [ -x "$py" ] || { echo "No python interpreter at: $py (set GRUT_PY / SPLATS_PY or CONDA_BASE)" >&2; exit 1; }
